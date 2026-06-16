@@ -1,0 +1,5 @@
+atproto
+httpx
+Mastodon.py
+python-dotenv
+redis
