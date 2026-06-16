@@ -16,18 +16,16 @@ Dependencies:
 """
 
 import argparse
-import hashlib
-import json
 import os
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, date
 from io import BytesIO
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+import redis
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -413,43 +411,17 @@ def format_aggregate_post(agg: AggregateData, max_chars: int = 300) -> str:
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
-# File-based for v1. On Railway, mount a persistent volume and set POST_LOG_PATH.
-# For v2, swap _load_log/_save_log for Firebase reads/writes.
 
-LOG_PATH = Path(
-    os.environ.get("POST_LOG_PATH", str(Path.home() / ".cache" / "temphist" / "post_log.json"))
-)
-
-
-def _load_log() -> dict:
-    if LOG_PATH.exists():
-        try:
-            return json.loads(LOG_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def _save_log(log: dict) -> None:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOG_PATH.write_text(json.dumps(log, indent=2))
-
-
-def _post_key(location_id: str, period: str) -> str:
-    day = date.today().isoformat()
-    return hashlib.md5(f"{location_id}:{period}:{day}".encode()).hexdigest()
+r = redis.from_url(os.environ["REDIS_URL"])
 
 
 def already_posted(location_id: str, period: str) -> bool:
-    return _post_key(location_id, period) in _load_log()
+    return bool(r.exists(f"poster:posted:{location_id}:{period}:{date.today().isoformat()}"))
 
 
 def mark_posted(location_id: str, period: str) -> None:
-    log = _load_log()
-    log[_post_key(location_id, period)] = datetime.now().isoformat()
-    # Prune entries from before this month
-    cutoff = date.today().replace(day=1).isoformat()
-    _save_log({k: v for k, v in log.items() if v >= cutoff})
+    key = f"poster:posted:{location_id}:{period}:{date.today().isoformat()}"
+    r.set(key, datetime.now().isoformat(), ex=60 * 60 * 24 * 35)  # 35-day TTL
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,9 @@
 """Unit tests for poster.py."""
 
-import json
+import os
 import sys
 import types
 from datetime import date, datetime
-from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -14,9 +13,16 @@ import pytest
 # Stub heavy optional imports so tests run without the social SDK packages
 # ---------------------------------------------------------------------------
 
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+
 for mod in ("atproto", "mastodon", "Mastodon"):
     if mod not in sys.modules:
         sys.modules[mod] = types.ModuleType(mod)
+
+if "redis" not in sys.modules:
+    _redis_mod = types.ModuleType("redis")
+    _redis_mod.from_url = lambda url: None  # poster.r patched per-test
+    sys.modules["redis"] = _redis_mod
 
 import poster  # noqa: E402  (must come after stubs)
 
@@ -37,6 +43,19 @@ from poster import (  # noqa: E402
     preferred_units,
     unit_symbol,
 )
+
+
+class FakeRedis:
+    """In-memory Redis stand-in for deduplication tests."""
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def exists(self, key):
+        return key in self._store
+
+    def set(self, key, value, ex=None):
+        self._store[key] = value
 
 
 # ---------------------------------------------------------------------------
@@ -330,44 +349,28 @@ class TestIsAggregateDue:
 
 
 class TestDeduplication:
-    def test_not_posted_initially(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            assert already_posted("london", "today") is False
+    @pytest.fixture(autouse=True)
+    def fake_redis(self):
+        fr = FakeRedis()
+        with patch.object(poster, "r", fr):
+            yield fr
 
-    def test_posted_after_mark(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            mark_posted("london", "today")
-            assert already_posted("london", "today") is True
+    def test_not_posted_initially(self):
+        assert already_posted("london", "today") is False
 
-    def test_different_location_not_affected(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            mark_posted("london", "today")
-            assert already_posted("new_york", "today") is False
+    def test_posted_after_mark(self):
+        mark_posted("london", "today")
+        assert already_posted("london", "today") is True
 
-    def test_different_period_not_affected(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            mark_posted("london", "today")
-            assert already_posted("london", "week") is False
+    def test_different_location_not_affected(self):
+        mark_posted("london", "today")
+        assert already_posted("new_york", "today") is False
 
-    def test_log_file_created(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            mark_posted("london", "today")
-            assert log.exists()
+    def test_different_period_not_affected(self):
+        mark_posted("london", "today")
+        assert already_posted("london", "week") is False
 
-    def test_log_is_valid_json(self, tmp_path):
-        log = tmp_path / "log.json"
-        with patch.object(poster, "LOG_PATH", log):
-            mark_posted("london", "today")
-            data = json.loads(log.read_text())
-            assert isinstance(data, dict)
-
-    def test_corrupted_log_treated_as_empty(self, tmp_path):
-        log = tmp_path / "log.json"
-        log.write_text("not json")
-        with patch.object(poster, "LOG_PATH", log):
-            assert already_posted("london", "today") is False
+    def test_key_includes_date(self, fake_redis):
+        mark_posted("london", "today")
+        today = date.today().isoformat()
+        assert any(today in k for k in fake_redis._store)
