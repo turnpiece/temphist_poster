@@ -79,7 +79,7 @@ def make_post(**kwargs) -> TempHistPost:
         trend="stable",
         share_url="https://temphist.com/s/abc123",
         chart_image=b"\x89PNG",
-        units="metric",
+        units="celsius",
     )
     return TempHistPost(**{**defaults, **kwargs})
 
@@ -100,18 +100,18 @@ def make_loc(
 
 
 class TestUnits:
-    def test_us_country_gets_us_units(self):
-        assert preferred_units("US") == "us"
+    def test_us_country_gets_fahrenheit(self):
+        assert preferred_units("US") == "fahrenheit"
 
-    def test_non_us_gets_metric(self):
+    def test_non_us_gets_celsius(self):
         for c in ("GB", "AU", "CA", "SG", "ZA"):
-            assert preferred_units(c) == "metric"
+            assert preferred_units(c) == "celsius"
 
-    def test_unit_symbol_us(self):
-        assert unit_symbol("us") == "°F"
+    def test_unit_symbol_fahrenheit(self):
+        assert unit_symbol("fahrenheit") == "°F"
 
-    def test_unit_symbol_metric(self):
-        assert unit_symbol("metric") == "°C"
+    def test_unit_symbol_celsius(self):
+        assert unit_symbol("celsius") == "°C"
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +125,11 @@ class TestFormatLocationPost:
         assert "London" in text
 
     def test_contains_average(self):
-        text = format_location_post(make_post(average=14.5, units="metric"))
+        text = format_location_post(make_post(average=14.5, units="celsius"))
         assert "14.5°C" in text
 
     def test_us_units_show_fahrenheit(self):
-        text = format_location_post(make_post(country="US", units="us", average=57.2))
+        text = format_location_post(make_post(country="US", units="fahrenheit", average=57.2))
         assert "°F" in text
 
     def test_contains_share_url(self):

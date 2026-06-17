@@ -53,7 +53,8 @@ Copy `.env.example` to `.env` and fill in the values above.
 # Normal run — checks schedule, posts if due
 python poster.py
 
-# Preview output without posting or authenticating
+# Preview today's due posts without posting or authenticating
+# (bypasses the 4pm local-time window; still respects day-of-week rules)
 python poster.py --dry-run
 
 # Force a specific period for all (or one) location

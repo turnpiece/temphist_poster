@@ -4,7 +4,7 @@ Posts temperature history summaries and cross-location aggregates to social medi
 
 Usage:
     python poster.py                    # run normally (checks schedule)
-    python poster.py --dry-run          # preview without posting
+    python poster.py --dry-run          # preview today's due posts (bypasses 4pm window)
     python poster.py --force today      # force a specific period
     python poster.py --location london  # single location only
 
@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, date
 from io import BytesIO
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -177,6 +178,14 @@ TIER_SCHEDULE = {
     },
 }
 
+# Internal schedule period → TempHist API period
+PERIOD_API_NAMES = {
+    "today": "daily",
+    "week": "weekly",
+    "month": "monthly",
+    "year": "yearly",
+}
+
 # Aggregate weekly post fires on Fridays
 AGGREGATE_POST_DAY = 4  # 0=Mon
 
@@ -203,7 +212,7 @@ class TempHistPost:
     trend: str  # "warming" | "cooling" | "stable"
     share_url: str
     chart_image: bytes
-    units: str = "metric"  # "metric" | "us"
+    units: str = "celsius"  # "celsius" | "fahrenheit"
 
 
 @dataclass
@@ -250,31 +259,87 @@ class AggregateData:
 
 
 def preferred_units(country: str) -> str:
-    return "us" if country.upper() in FAHRENHEIT_COUNTRIES else "metric"
+    return "fahrenheit" if country.upper() in FAHRENHEIT_COUNTRIES else "celsius"
 
 
 def unit_symbol(units: str) -> str:
-    return "°F" if units == "us" else "°C"
+    return "°F" if units == "fahrenheit" else "°C"
 
 
-def fetch_temphist_data(period: str, loc: dict) -> TempHistPost:
+def record_identifier(loc: dict, now_utc: datetime | None = None) -> str:
+    now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
+    local = now.astimezone(ZoneInfo(loc["tz"]))
+    return local.strftime("%m-%d")
+
+
+def records_path(period: str, location: str, identifier: str, suffix: str = "") -> str:
+    api_period = PERIOD_API_NAMES[period]
+    path = f"/v1/records/{api_period}/{location}/{identifier}"
+    if suffix:
+        path += f"/{suffix}"
+    return path
+
+
+def classify_trend(slope: float) -> str:
+    if slope > 0:
+        return "warming"
+    if slope < 0:
+        return "cooling"
+    return "stable"
+
+
+def site_url() -> str:
+    return os.environ.get("TEMPHIST_SITE_URL", "https://temphist.com").rstrip("/")
+
+
+def fetch_temphist_data(
+    period: str, loc: dict, now_utc: datetime | None = None
+) -> TempHistPost:
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     units = preferred_units(loc["country"])
+    identifier = record_identifier(loc, now_utc)
+    ref_year = (
+        now_utc or datetime.now(tz=ZoneInfo("UTC"))
+    ).astimezone(ZoneInfo(loc["tz"])).year
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        resp = client.get(
-            f"/summary/{loc['id']}",
-            params={"period": period, "unitGroup": units},
+        summary_resp = client.get(
+            records_path(period, loc["id"], identifier, "summary"),
+            params={"unit_group": units},
         )
-        resp.raise_for_status()
-        data = resp.json()
+        summary_resp.raise_for_status()
+        summary = summary_resp.json()["data"]
 
-        chart_resp = client.get(
-            f"/chart/{loc['id']}",
-            params={"period": period, "unitGroup": units},
+        average_resp = client.get(
+            records_path(period, loc["id"], identifier, "average"),
+            params={"unit_group": units},
         )
+        average_resp.raise_for_status()
+        average = average_resp.json()["data"]["mean"]
+
+        trend_resp = client.get(
+            records_path(period, loc["id"], identifier, "trend"),
+            params={"unit_group": units},
+        )
+        trend_resp.raise_for_status()
+        trend = classify_trend(trend_resp.json()["data"]["slope"])
+
+        share_resp = client.post(
+            "/v1/shares",
+            json={
+                "location": loc["id"],
+                "period": PERIOD_API_NAMES[period],
+                "identifier": identifier,
+                "ref_year": ref_year,
+                "unit": units,
+            },
+        )
+        share_resp.raise_for_status()
+        share = share_resp.json()
+
+        chart_resp = client.get(f"/v1/og/{share['id']}.png")
         chart_resp.raise_for_status()
 
     return TempHistPost(
@@ -282,42 +347,51 @@ def fetch_temphist_data(period: str, loc: dict) -> TempHistPost:
         location_id=loc["id"],
         location=loc["label"],
         country=loc["country"],
-        summary=data["summary"],
-        average=data["average"],
-        trend=data["trend"],
-        share_url=data["share_url"],
+        summary=summary,
+        average=average,
+        trend=trend,
+        share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
         units=units,
     )
 
 
-def fetch_aggregate_data(period: str = "today") -> AggregateData:
+def fetch_aggregate_data(period: str = "today", now_utc: datetime | None = None) -> AggregateData:
     """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     tier1 = [loc for loc in LOCATIONS if loc["tier"] == TIER_1]
     summaries = []
+    now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
         for loc in tier1:
             units = preferred_units(loc["country"])
-            resp = client.get(
-                f"/summary/{loc['id']}",
-                params={"period": period, "unitGroup": units},
-            )
-            if resp.is_success:
-                d = resp.json()
-                summaries.append(
-                    LocationSummary(
-                        location=loc["label"],
-                        average=d["average"],
-                        trend=d["trend"],
-                        units=units,
-                    )
+            identifier = record_identifier(loc, now)
+            try:
+                average_resp = client.get(
+                    records_path(period, loc["id"], identifier, "average"),
+                    params={"unit_group": units},
                 )
+                trend_resp = client.get(
+                    records_path(period, loc["id"], identifier, "trend"),
+                    params={"unit_group": units},
+                )
+            except httpx.HTTPError:
+                continue
+            if not average_resp.is_success or not trend_resp.is_success:
+                continue
+            summaries.append(
+                LocationSummary(
+                    location=loc["label"],
+                    average=average_resp.json()["data"]["mean"],
+                    trend=classify_trend(trend_resp.json()["data"]["slope"]),
+                    units=units,
+                )
+            )
 
-    return AggregateData(date=date.today(), summaries=summaries)
+    return AggregateData(date=now.date(), summaries=summaries)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +664,9 @@ def post_location_period(
                 f"\n── {platform.name.upper()} | {loc_id} | {period} ({len(text)} chars) ──"
             )
             print(text)
+            image_path = Path(f"/tmp/{loc_id}_{period}.png")
+            image_path.write_bytes(data.chart_image)
+            print(f"  [image saved to {image_path}]")
             continue
 
         try:
@@ -678,14 +755,35 @@ def _resolve_locations(location_arg: str | None) -> list:
     return matched
 
 
-def _periods_for_location(loc: dict, force: str | None, location_arg: str | None, now_utc: datetime) -> list:
+def _periods_for_location(
+    loc: dict,
+    force: str | None,
+    location_arg: str | None,
+    now_utc: datetime,
+    dry_run: bool = False,
+) -> list:
     if loc["tier"] == TIER_3 and not force and not location_arg:
         return []
     if force and force != "aggregate":
         return [force]
-    if is_posting_time(loc, now_utc):
+    if dry_run or is_posting_time(loc, now_utc):
         return periods_due_today(loc, now_utc)
     return []
+
+
+def _aggregate_due(
+    force: str | None,
+    location_arg: str | None,
+    now_utc: datetime,
+    dry_run: bool,
+) -> bool:
+    if force == "aggregate":
+        return True
+    if force or location_arg:
+        return False
+    if dry_run:
+        return now_utc.weekday() == AGGREGATE_POST_DAY
+    return is_aggregate_due(now_utc)
 
 
 def main():
@@ -694,22 +792,37 @@ def main():
     platforms = make_platforms(args.platforms, args.dry_run)
     locations = _resolve_locations(args.location)
 
+    if args.dry_run and not args.force:
+        print(
+            "Dry run — previewing posts due today "
+            "(4pm local time check bypassed; use --force to preview a specific period)"
+        )
+
+    posted_any = False
+
     # Aggregate post (Friday, or forced)
-    if args.force == "aggregate" or (
-        not args.force and not args.location and is_aggregate_due(now_utc)
-    ):
+    if _aggregate_due(args.force, args.location, now_utc, args.dry_run):
         print("Posting aggregate...")
         post_aggregate(platforms, dry_run=args.dry_run)
+        posted_any = True
 
     # Per-location posts
     for loc in locations:
-        periods = _periods_for_location(loc, args.force, args.location, now_utc)
+        periods = _periods_for_location(
+            loc, args.force, args.location, now_utc, dry_run=args.dry_run
+        )
         if not periods:
             continue
 
+        posted_any = True
         print(f"{loc['label']} ({loc['tier']}):")
         for period in periods:
             post_location_period(loc, period, platforms, dry_run=args.dry_run)
+
+    if args.dry_run and not posted_any:
+        print(
+            "Nothing due right now. Try --force today or --force week --location london."
+        )
 
 
 if __name__ == "__main__":
