@@ -22,7 +22,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, date
 from io import BytesIO
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -212,6 +211,7 @@ class TempHistPost:
     trend: str  # "warming" | "cooling" | "stable"
     share_url: str
     chart_image: bytes
+    chart_image_url: str
     units: str = "celsius"  # "celsius" | "fahrenheit"
 
 
@@ -352,6 +352,7 @@ def fetch_temphist_data(
         trend=trend,
         share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
+        chart_image_url=f"{base_url}/v1/og/{share['id']}.png",
         units=units,
     )
 
@@ -664,9 +665,7 @@ def post_location_period(
                 f"\n── {platform.name.upper()} | {loc_id} | {period} ({len(text)} chars) ──"
             )
             print(text)
-            image_path = Path(f"/tmp/{loc_id}_{period}.png")
-            image_path.write_bytes(data.chart_image)
-            print(f"  [image saved to {image_path}]")
+            print(f"  [image: {data.chart_image_url}]")
             continue
 
         try:
