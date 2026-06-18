@@ -77,8 +77,11 @@ def make_post(**kwargs) -> TempHistPost:
         summary="Mild temperatures across the city.",
         average=14.5,
         trend="stable",
+        slope=0.0,
+        slope_error=0.05,
         share_url="https://temphist.com/s/abc123",
         chart_image=b"\x89PNG",
+        chart_image_url="https://api.temphist.com/v1/og/abc123.png",
         units="celsius",
     )
     return TempHistPost(**{**defaults, **kwargs})

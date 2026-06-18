@@ -209,6 +209,8 @@ class TempHistPost:
     summary: str
     average: float
     trend: str  # "warming" | "cooling" | "stable"
+    slope: float
+    slope_error: float | None
     share_url: str
     chart_image: bytes
     chart_image_url: str
@@ -301,8 +303,10 @@ def fetch_temphist_data(
     units = preferred_units(loc["country"])
     identifier = record_identifier(loc, now_utc)
     ref_year = (
-        now_utc or datetime.now(tz=ZoneInfo("UTC"))
-    ).astimezone(ZoneInfo(loc["tz"])).year
+        (now_utc or datetime.now(tz=ZoneInfo("UTC")))
+        .astimezone(ZoneInfo(loc["tz"]))
+        .year
+    )
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
         summary_resp = client.get(
@@ -324,7 +328,10 @@ def fetch_temphist_data(
             params={"unit_group": units},
         )
         trend_resp.raise_for_status()
-        trend = classify_trend(trend_resp.json()["data"]["slope"])
+        trend_data = trend_resp.json()["data"]
+        slope = trend_data["slope"]
+        slope_error = trend_data.get("slope_error")
+        trend = classify_trend(slope)
 
         share_resp = client.post(
             "/v1/shares",
@@ -350,6 +357,8 @@ def fetch_temphist_data(
         summary=summary,
         average=average,
         trend=trend,
+        slope=slope,
+        slope_error=slope_error,
         share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
         chart_image_url=f"{base_url}/v1/og/{share['id']}.png",
@@ -357,7 +366,9 @@ def fetch_temphist_data(
     )
 
 
-def fetch_aggregate_data(period: str = "today", now_utc: datetime | None = None) -> AggregateData:
+def fetch_aggregate_data(
+    period: str = "today", now_utc: datetime | None = None
+) -> AggregateData:
     """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
@@ -430,7 +441,9 @@ def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
     body = (
         f"{label} in {post.location} {trend_icon}\n\n"
         f"{post.summary}\n\n"
-        f"Avg: {post.average:.1f}{sym} · Trend: {post.trend.capitalize()}\n\n"
+        f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):.2f}"
+        + (f" ± {post.slope_error:.2f}" if post.slope_error is not None else "")
+        + f" {sym}/decade\n\n"
         f"{tags} {loc_tag} #TempHist\n\n"
         f"{post.share_url}"
     )
@@ -491,7 +504,9 @@ r = redis.from_url(os.environ["REDIS_URL"])
 
 
 def already_posted(location_id: str, period: str) -> bool:
-    return bool(r.exists(f"poster:posted:{location_id}:{period}:{date.today().isoformat()}"))
+    return bool(
+        r.exists(f"poster:posted:{location_id}:{period}:{date.today().isoformat()}")
+    )
 
 
 def mark_posted(location_id: str, period: str) -> None:
