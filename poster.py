@@ -309,28 +309,20 @@ def fetch_temphist_data(
     )
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        summary_resp = client.get(
-            records_path(period, loc["id"], identifier, "summary"),
+        meta_resp = client.get(
+            records_path(period, loc["id"], identifier, "meta"),
             params={"unit_group": units},
         )
-        summary_resp.raise_for_status()
-        summary = summary_resp.json()["data"]
+        meta_resp.raise_for_status()
+        meta = meta_resp.json()["data"]
 
-        average_resp = client.get(
-            records_path(period, loc["id"], identifier, "average"),
-            params={"unit_group": units},
-        )
-        average_resp.raise_for_status()
-        average = average_resp.json()["data"]["mean"]
+        if ref_year in meta.get("metadata", {}).get("missing_years", []):
+            raise ValueError(f"No data for {ref_year} at {loc['id']}/{period}")
 
-        trend_resp = client.get(
-            records_path(period, loc["id"], identifier, "trend"),
-            params={"unit_group": units},
-        )
-        trend_resp.raise_for_status()
-        trend_data = trend_resp.json()["data"]
-        slope = trend_data["slope"]
-        slope_error = trend_data.get("slope_error")
+        summary = meta["summary"]
+        average = meta["average"]["mean"]
+        slope = meta["trend"]["slope"]
+        slope_error = meta["trend"].get("slope_error")
         trend = classify_trend(slope)
 
         share_resp = client.post(
@@ -441,8 +433,8 @@ def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
     body = (
         f"{label} in {post.location} {trend_icon}\n\n"
         f"{post.summary}\n\n"
-        f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):.2f}"
-        + (f" ± {post.slope_error:.2f}" if post.slope_error is not None else "")
+        f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):{'.1f' if post.units == 'fahrenheit' else '.2f'}}"
+        + (f" ± {post.slope_error:{'.1f' if post.units == 'fahrenheit' else '.2f'}}" if post.slope_error is not None else "")
         + f" {sym}/decade\n\n"
         f"{tags} {loc_tag} #TempHist\n\n"
         f"{post.share_url}"
