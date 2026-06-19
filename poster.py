@@ -173,7 +173,7 @@ TIER_SCHEDULE = {
         "today": None,  # daily only
     },
     TIER_3: {
-        # v2: "today": "remarkable_only"
+        "today": None,  # daily, but gated by is_remarkable in post_location_period
     },
 }
 
@@ -203,7 +203,11 @@ class TempHistPost:
     trend: str  # "warming" | "cooling" | "stable"
     share_url: str
     chart_image: bytes
-    units: str = "metric"  # "metric" | "us"
+    chart_image_url: str = ""
+    units: str = "celsius"  # "celsius" | "fahrenheit"
+    ranking_warm: int | None = None
+    ranking_cold: int | None = None
+    gradient_factor: float | None = None
 
 
 @dataclass
@@ -249,32 +253,86 @@ class AggregateData:
 # ---------------------------------------------------------------------------
 
 
+PERIOD_API_NAMES = {
+    "today": "daily",
+    "week": "weekly",
+    "month": "monthly",
+    "year": "yearly",
+}
+
+
 def preferred_units(country: str) -> str:
-    return "us" if country.upper() in FAHRENHEIT_COUNTRIES else "metric"
+    return "fahrenheit" if country.upper() in FAHRENHEIT_COUNTRIES else "celsius"
 
 
 def unit_symbol(units: str) -> str:
-    return "°F" if units == "us" else "°C"
+    return "°F" if units == "fahrenheit" else "°C"
 
 
-def fetch_temphist_data(period: str, loc: dict) -> TempHistPost:
+def record_identifier(loc: dict, now_utc: datetime | None = None) -> str:
+    now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
+    local = now.astimezone(ZoneInfo(loc["tz"]))
+    return local.strftime("%m-%d")
+
+
+def classify_trend(slope: float) -> str:
+    if slope > 0:
+        return "warming"
+    if slope < 0:
+        return "cooling"
+    return "stable"
+
+
+def site_url() -> str:
+    return os.environ.get("TEMPHIST_SITE_URL", "https://temphist.com").rstrip("/")
+
+
+def fetch_temphist_data(period: str, loc: dict, now_utc: datetime | None = None) -> TempHistPost:
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     units = preferred_units(loc["country"])
+    identifier = record_identifier(loc, now_utc)
+    api_period = PERIOD_API_NAMES[period]
+    ref_year = (
+        (now_utc or datetime.now(tz=ZoneInfo("UTC")))
+        .astimezone(ZoneInfo(loc["tz"]))
+        .year
+    )
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        resp = client.get(
-            f"/summary/{loc['id']}",
-            params={"period": period, "unitGroup": units},
+        meta_resp = client.get(
+            f"/v1/records/{api_period}/{loc['id']}/{identifier}/meta",
+            params={"unit_group": units},
         )
-        resp.raise_for_status()
-        data = resp.json()
+        meta_resp.raise_for_status()
+        meta_body = meta_resp.json()
+        meta = meta_body["data"]
 
-        chart_resp = client.get(
-            f"/chart/{loc['id']}",
-            params={"period": period, "unitGroup": units},
+        if ref_year in meta_body.get("metadata", {}).get("missing_years", []):
+            raise ValueError(f"No data for {ref_year} at {loc['id']}/{period}")
+
+        summary = meta["summary"]
+        average = meta["average"]["mean"]
+        slope = meta["trend"]["slope"]
+        gradient_factor = meta["trend"].get("gradient_factor")
+        trend = classify_trend(slope)
+        ranking = meta.get("ranking", {})
+
+        share_resp = client.post(
+            "/v1/shares",
+            json={
+                "location": loc["id"],
+                "period": api_period,
+                "identifier": identifier,
+                "ref_year": ref_year,
+                "unit": units,
+            },
         )
+        share_resp.raise_for_status()
+        share = share_resp.json()
+
+        chart_resp = client.get(f"/v1/og/{share['id']}.png")
         chart_resp.raise_for_status()
 
     return TempHistPost(
@@ -282,37 +340,44 @@ def fetch_temphist_data(period: str, loc: dict) -> TempHistPost:
         location_id=loc["id"],
         location=loc["label"],
         country=loc["country"],
-        summary=data["summary"],
-        average=data["average"],
-        trend=data["trend"],
-        share_url=data["share_url"],
+        summary=summary,
+        average=average,
+        trend=trend,
+        share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
+        chart_image_url=f"{base_url}/v1/og/{share['id']}.png",
         units=units,
+        ranking_warm=ranking.get("warm"),
+        ranking_cold=ranking.get("cold"),
+        gradient_factor=gradient_factor,
     )
 
 
-def fetch_aggregate_data(period: str = "today") -> AggregateData:
+def fetch_aggregate_data(period: str = "today", now_utc: datetime | None = None) -> AggregateData:
     """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     tier1 = [loc for loc in LOCATIONS if loc["tier"] == TIER_1]
     summaries = []
+    now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
 
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
         for loc in tier1:
             units = preferred_units(loc["country"])
+            identifier = record_identifier(loc, now)
+            api_period = PERIOD_API_NAMES[period]
             resp = client.get(
-                f"/summary/{loc['id']}",
-                params={"period": period, "unitGroup": units},
+                f"/v1/records/{api_period}/{loc['id']}/{identifier}/meta",
+                params={"unit_group": units},
             )
             if resp.is_success:
-                d = resp.json()
+                meta = resp.json()["data"]
                 summaries.append(
                     LocationSummary(
                         location=loc["label"],
-                        average=d["average"],
-                        trend=d["trend"],
+                        average=meta["average"]["mean"],
+                        trend=classify_trend(meta["trend"]["slope"]),
                         units=units,
                     )
                 )
@@ -464,19 +529,19 @@ def is_aggregate_due(now_utc: datetime) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def is_remarkable(loc: dict, period: str) -> bool:
-    """
-    v2: return True if today's data for this location/period is statistically
-    notable (e.g. record high, top-5% anomaly, longest warming streak).
+def _ranking_points(rank: int) -> int:
+    return {1: 10, 2: 6, 3: 4, 4: 3, 5: 2, 6: 1}.get(rank, 0)
 
-    Will need:
-    - A historical baseline endpoint on the TempHist API
-    - A threshold definition (configurable per location/period)
-    - Deduplication: don't post "warmest month-to-date" two days running
 
-    Raises NotImplementedError until implemented.
-    """
-    raise NotImplementedError("Remarkable-day logic not yet implemented (v2)")
+def remarkability_score(ranking_warm: int, ranking_cold: int, gradient_factor: float) -> float:
+    best_rank = min(ranking_warm, ranking_cold)
+    return abs(gradient_factor) * 10 + _ranking_points(best_rank)
+
+
+def is_remarkable(data: TempHistPost, threshold: float = 10.0) -> bool:
+    if data.ranking_warm is None or data.ranking_cold is None or data.gradient_factor is None:
+        return False
+    return remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor) >= threshold
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +641,10 @@ def post_location_period(
         print(f"  ✗ fetch {loc_id}/{period}: {exc}", file=sys.stderr)
         return
 
+    if loc.get("tier") == TIER_3 and not is_remarkable(data):
+        print(f"  skip {loc_id}/{period} — not remarkable")
+        return
+
     sym = unit_symbol(data.units)
     alt_text = (
         f"Temperature chart for {data.location}, {PERIOD_LABELS[period].lower()}. "
@@ -590,6 +659,7 @@ def post_location_period(
                 f"\n── {platform.name.upper()} | {loc_id} | {period} ({len(text)} chars) ──"
             )
             print(text)
+            print(f"  [image: {data.chart_image_url}]")
             continue
 
         try:
@@ -678,12 +748,14 @@ def _resolve_locations(location_arg: str | None) -> list:
     return matched
 
 
-def _periods_for_location(loc: dict, force: str | None, location_arg: str | None, now_utc: datetime) -> list:
+def _periods_for_location(
+    loc: dict, force: str | None, location_arg: str | None, now_utc: datetime, dry_run: bool = False
+) -> list:
     if loc["tier"] == TIER_3 and not force and not location_arg:
         return []
     if force and force != "aggregate":
         return [force]
-    if is_posting_time(loc, now_utc):
+    if dry_run or is_posting_time(loc, now_utc):
         return periods_due_today(loc, now_utc)
     return []
 
@@ -696,14 +768,14 @@ def main():
 
     # Aggregate post (Friday, or forced)
     if args.force == "aggregate" or (
-        not args.force and not args.location and is_aggregate_due(now_utc)
+        not args.force and not args.location and (args.dry_run or is_aggregate_due(now_utc))
     ):
         print("Posting aggregate...")
         post_aggregate(platforms, dry_run=args.dry_run)
 
     # Per-location posts
     for loc in locations:
-        periods = _periods_for_location(loc, args.force, args.location, now_utc)
+        periods = _periods_for_location(loc, args.force, args.location, now_utc, dry_run=args.dry_run)
         if not periods:
             continue
 
