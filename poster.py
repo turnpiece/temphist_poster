@@ -46,14 +46,12 @@ log.info("poster starting up")
 # Location configuration
 # ---------------------------------------------------------------------------
 
-# Tier definitions — controls posting behaviour.
-# TIER_1: post all periods on their full schedule
-# TIER_2: daily posts only in v1
-# TIER_3: conditional/remarkable posts only — stub for v2
+# Tier definitions — controls posting frequency.
+# TIER_1: full schedule (daily, weekly, monthly, yearly) — preapproved locations
+# TIER_2: full schedule, but only when the day is remarkable — popular non-preapproved locations
 
 TIER_1 = "tier1"
 TIER_2 = "tier2"
-TIER_3 = "tier3"
 
 FAHRENHEIT_COUNTRIES = {"US"}
 
@@ -63,16 +61,16 @@ FAHRENHEIT_COUNTRIES = {"US"}
 # [0]    → weekdays list (0=Mon … 6=Sun)
 TIER_SCHEDULE = {
     TIER_1: {
-        "today": None,  # daily
-        "week": [0],  # Mondays
-        "month": "first",  # 1st of month
-        "year": "first",  # monthly (year-to-date is useful for climate audience)
+        "today": None,    # daily
+        "week": [0],      # Mondays
+        "month": "first", # 1st of month
+        "year": "first",  # 1st of month (year-to-date)
     },
     TIER_2: {
-        "today": None,  # daily only
-    },
-    TIER_3: {
-        "today": None,  # daily, but gated by is_remarkable in post_location_period
+        "today": None,    # daily — only posted when remarkable
+        "week": [0],      # Mondays — only posted when remarkable
+        "month": "first", # 1st of month — only posted when remarkable
+        "year": "first",  # 1st of month — only posted when remarkable
     },
 }
 
@@ -90,26 +88,38 @@ POST_WINDOW_MINUTES = 15
 # Location loader
 # ---------------------------------------------------------------------------
 
-
 def load_locations() -> list:
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    log.info("loading locations from %s/v1/locations/preapproved", base_url)
+    log.info("loading locations from API")
+
     with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        resp = client.get("/v1/locations/preapproved")
-        resp.raise_for_status()
-    locations = [
-        {
-            "id": loc["id"],
-            "label": loc["name"],
-            "tz": loc["timezone"],
-            "country": loc["country_code"],
-            "tier": loc["tier"],
+        pre_resp = client.get("/v1/locations/preapproved")
+        pre_resp.raise_for_status()
+        pop_resp = client.get("/v1/locations/popular")
+        pop_resp.raise_for_status()
+
+    def _to_loc(raw: dict, tier: str) -> dict:
+        return {
+            "id": raw["id"],
+            "label": raw["name"],
+            "tz": raw["timezone"],
+            "country": raw["country_code"],
+            "tier": tier,
         }
-        for loc in resp.json()["locations"]
-    ]
-    log.info("loaded %d locations", len(locations))
+
+    preapproved_ids = {loc["id"] for loc in pre_resp.json()["locations"]}
+    locations = [_to_loc(loc, TIER_1) for loc in pre_resp.json()["locations"]]
+
+    # Add popular locations that aren't already in the preapproved list as tier2.
+    # Non-preapproved locations may lack timezone or country_code, so skip those.
+    for loc in pop_resp.json()["locations"]:
+        if loc["id"] not in preapproved_ids and loc.get("timezone") and loc.get("country_code"):
+            locations.append(_to_loc(loc, TIER_2))
+
+    tier1_count = sum(1 for loc in locations if loc["tier"] == TIER_1)
+    log.info("loaded %d locations (%d tier1, %d tier2)", len(locations), tier1_count, len(locations) - tier1_count)
     return locations
 
 
@@ -470,7 +480,7 @@ def is_aggregate_due(now_utc: datetime) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# v2 stub: remarkable-day conditional posting
+# Remarkability gate (tier 2)
 # ---------------------------------------------------------------------------
 
 
@@ -478,24 +488,15 @@ def _ranking_points(rank: int) -> int:
     return {1: 10, 2: 6, 3: 4, 4: 3, 5: 2, 6: 1}.get(rank, 0)
 
 
-def remarkability_score(
-    ranking_warm: int, ranking_cold: int, gradient_factor: float
-) -> float:
+def remarkability_score(ranking_warm: int, ranking_cold: int, gradient_factor: float) -> float:
     best_rank = min(ranking_warm, ranking_cold)
     return abs(gradient_factor) * 10 + _ranking_points(best_rank)
 
 
 def is_remarkable(data: TempHistPost, threshold: float = 10.0) -> bool:
-    if (
-        data.ranking_warm is None
-        or data.ranking_cold is None
-        or data.gradient_factor is None
-    ):
+    if data.ranking_warm is None or data.ranking_cold is None or data.gradient_factor is None:
         return False
-    return (
-        remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor)
-        >= threshold
-    )
+    return remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor) >= threshold
 
 
 # ---------------------------------------------------------------------------
@@ -596,8 +597,8 @@ def post_location_period(
         print(f"  ✗ fetch {loc_id}/{period}: {exc}", file=sys.stderr)
         return
 
-    if loc.get("tier") == TIER_3 and not is_remarkable(data):
-        print(f"  skip {loc_id}/{period} — not remarkable")
+    if loc["tier"] == TIER_2 and not is_remarkable(data):
+        log.info("skip %s/%s — not remarkable", loc_id, period)
         return
 
     sym = unit_symbol(data.units)
@@ -713,8 +714,6 @@ def _periods_for_location(
     now_utc: datetime,
     dry_run: bool = False,
 ) -> list:
-    if loc["tier"] == TIER_3 and not force and not location_arg:
-        return []
     if force and force != "aggregate":
         return [force]
     if dry_run or is_posting_time(loc, now_utc):
