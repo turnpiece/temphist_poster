@@ -16,6 +16,7 @@ Dependencies:
 """
 
 import argparse
+import logging
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -29,6 +30,14 @@ import redis
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger(__name__)
+log.info("poster starting up")
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +299,7 @@ def site_url() -> str:
 def fetch_temphist_data(
     period: str, loc: dict, now_utc: datetime | None = None
 ) -> TempHistPost:
+    log.info("fetching %s/%s", loc["id"], period)
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -359,6 +369,7 @@ def fetch_aggregate_data(
     period: str = "today", now_utc: datetime | None = None
 ) -> AggregateData:
     """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
+    log.info("fetching aggregate data")
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -481,18 +492,29 @@ def format_aggregate_post(agg: AggregateData, max_chars: int = 300) -> str:
 # Deduplication
 # ---------------------------------------------------------------------------
 
-r = redis.from_url(os.environ["REDIS_URL"])
+_redis_client = None
+
+
+def _redis() -> redis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        url = os.environ["REDIS_URL"]
+        log.info("connecting to Redis")
+        _redis_client = redis.from_url(url)
+        _redis_client.ping()
+        log.info("Redis connected")
+    return _redis_client
 
 
 def already_posted(location_id: str, period: str) -> bool:
     return bool(
-        r.exists(f"poster:posted:{location_id}:{period}:{date.today().isoformat()}")
+        _redis().exists(f"poster:posted:{location_id}:{period}:{date.today().isoformat()}")
     )
 
 
 def mark_posted(location_id: str, period: str) -> None:
     key = f"poster:posted:{location_id}:{period}:{date.today().isoformat()}"
-    r.set(key, datetime.now().isoformat(), ex=60 * 60 * 24 * 35)  # 35-day TTL
+    _redis().set(key, datetime.now().isoformat(), ex=60 * 60 * 24 * 35)  # 35-day TTL
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +675,7 @@ def post_location_period(
     try:
         data = fetch_temphist_data(period, loc)
     except Exception as exc:
+        log.error("fetch %s/%s failed: %s", loc_id, period, exc)
         print(f"  ✗ fetch {loc_id}/{period}: {exc}", file=sys.stderr)
         return
 
@@ -695,6 +718,7 @@ def post_aggregate(platforms: list, dry_run: bool = False) -> None:
     try:
         agg = fetch_aggregate_data(period="today")
     except Exception as exc:
+        log.error("fetch aggregate failed: %s", exc)
         print(f"  ✗ fetch aggregate: {exc}", file=sys.stderr)
         return
 
@@ -781,7 +805,10 @@ def _periods_for_location(
 
 def main():
     args = parse_args()
+    log.info("args: dry_run=%s force=%s location=%s platforms=%s",
+             args.dry_run, args.force, args.location, args.platforms)
     now_utc = datetime.now(tz=ZoneInfo("UTC"))
+    log.info("now_utc=%s", now_utc.isoformat())
     platforms = make_platforms(args.platforms, args.dry_run)
     locations = _resolve_locations(args.location)
 
@@ -791,8 +818,11 @@ def main():
         and not args.location
         and (args.dry_run or is_aggregate_due(now_utc))
     ):
+        log.info("posting aggregate")
         print("Posting aggregate...")
         post_aggregate(platforms, dry_run=args.dry_run)
+    else:
+        log.info("skipping aggregate (not due)")
 
     # Per-location posts
     for loc in locations:
@@ -800,11 +830,15 @@ def main():
             loc, args.force, args.location, now_utc, dry_run=args.dry_run
         )
         if not periods:
+            log.info("skip %s — no periods due", loc["id"])
             continue
 
+        log.info("posting %s: %s", loc["id"], periods)
         print(f"{loc['label']} ({loc['tier']}):")
         for period in periods:
             post_location_period(loc, period, platforms, dry_run=args.dry_run)
+
+    log.info("poster done")
 
 
 if __name__ == "__main__":
