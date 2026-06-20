@@ -139,6 +139,8 @@ class TempHistPost:
     trend: str  # "warming" | "cooling" | "stable"
     slope: float
     slope_error: float | None
+    anomaly: float | None      # current year's deviation from historical mean
+    anomaly_std_dev: float | None  # std dev of historical values for this period
     share_url: str
     chart_image: bytes
     chart_image_url: str = ""
@@ -259,6 +261,8 @@ def fetch_temphist_data(
         slope_error = meta["trend"].get("slope_error")
         gradient_factor = meta["trend"].get("gradient_factor")
         trend = classify_trend(slope)
+        anomaly = meta.get("current_anomaly")
+        anomaly_std_dev = meta["average"].get("standard_deviation")
         ranking = meta.get("ranking", {})
 
         share_resp = client.post(
@@ -287,6 +291,8 @@ def fetch_temphist_data(
         trend=trend,
         slope=slope,
         slope_error=slope_error,
+        anomaly=anomaly,
+        anomaly_std_dev=anomaly_std_dev,
         share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
         chart_image_url=f"{base_url}/v1/og/{share['id']}.png",
@@ -343,11 +349,6 @@ PERIOD_LABELS = {
     "year": "This year",
 }
 
-TREND_EMOJI = {
-    "warming": "🌡️📈",
-    "cooling": "❄️📉",
-    "stable": "➡️",
-}
 
 PERIOD_TAGS = {
     "today": "#weather",
@@ -358,14 +359,34 @@ PERIOD_TAGS = {
 
 
 def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
-    trend_icon = TREND_EMOJI.get(post.trend.lower(), "🌡️")
+    if post.anomaly is not None and post.anomaly_std_dev is not None:
+        if post.anomaly > post.anomaly_std_dev:
+            anomaly_icon = "🌡️"
+        elif post.anomaly < -post.anomaly_std_dev:
+            anomaly_icon = "❄️"
+        else:
+            anomaly_icon = ""
+    else:
+        anomaly_icon = ""
+
+    if post.slope_error is not None:
+        if post.slope > post.slope_error:
+            trend_icon = "📈"
+        elif post.slope < -post.slope_error:
+            trend_icon = "📉"
+        else:
+            trend_icon = ""
+    else:
+        trend_icon = "📈" if post.slope > 0 else ("📉" if post.slope < 0 else "")
+
+    icons = anomaly_icon + trend_icon
     label = PERIOD_LABELS.get(post.period, post.period.capitalize())
     sym = unit_symbol(post.units)
     tags = PERIOD_TAGS.get(post.period, "#weather")
     loc_tag = f"#{post.location.replace(' ', '')}"
 
     body = (
-        f"{label} in {post.location} {trend_icon}\n\n"
+        f"{label} in {post.location}{' ' + icons if icons else ''}\n\n"
         f"{post.summary}\n\n"
         f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):.2f}"
         + (f" ± {post.slope_error:.2f}" if post.slope_error is not None else "")
