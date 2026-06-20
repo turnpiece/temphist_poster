@@ -37,6 +37,8 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log.info("poster starting up")
 
 
@@ -693,11 +695,11 @@ def post_location_period(
         text = format_location_post(data, max_chars=platform.MAX_CHARS)
 
         if dry_run:
-            print(
-                f"\n── {platform.name.upper()} | {loc_id} | {period} ({len(text)} chars) ──"
+            log.info(
+                "[DRY RUN] %s | %s | %s (%d chars)\n%s\n  [image: %s]",
+                platform.name.upper(), loc_id, period, len(text),
+                text, data.chart_image_url,
             )
-            print(text)
-            print(f"  [image: {data.chart_image_url}]")
             continue
 
         try:
@@ -726,8 +728,10 @@ def post_aggregate(platforms: list, dry_run: bool = False) -> None:
         text = format_aggregate_post(agg, max_chars=platform.MAX_CHARS)
 
         if dry_run:
-            print(f"\n── {platform.name.upper()} | AGGREGATE ({len(text)} chars) ──")
-            print(text)
+            log.info(
+                "[DRY RUN] %s | AGGREGATE (%d chars)\n%s",
+                platform.name.upper(), len(text), text,
+            )
             continue
 
         try:
@@ -819,7 +823,6 @@ def main():
         and (args.dry_run or is_aggregate_due(now_utc))
     ):
         log.info("posting aggregate")
-        print("Posting aggregate...")
         post_aggregate(platforms, dry_run=args.dry_run)
     else:
         log.info("skipping aggregate (not due)")
@@ -834,7 +837,6 @@ def main():
             continue
 
         log.info("posting %s: %s", loc["id"], periods)
-        print(f"{loc['label']} ({loc['tier']}):")
         for period in periods:
             post_location_period(loc, period, platforms, dry_run=args.dry_run)
 
