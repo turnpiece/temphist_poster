@@ -295,7 +295,7 @@ def classify_trend(slope: float) -> str:
 
 
 def site_url() -> str:
-    return os.environ.get("TEMPHIST_SITE_URL", "https://temphist.com").rstrip("/")
+    return os.environ.get("TEMPHIST_URL", "https://temphist.com").rstrip("/")
 
 
 def fetch_temphist_data(
