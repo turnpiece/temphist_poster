@@ -33,14 +33,17 @@ from poster import (  # noqa: E402
     AggregateData,
     LocationSummary,
     TempHistPost,
+    _ranking_points,
     already_posted,
     format_aggregate_post,
     format_location_post,
     is_aggregate_due,
     is_posting_time,
+    is_remarkable,
     mark_posted,
     periods_due_today,
     preferred_units,
+    remarkability_score,
     unit_symbol,
 )
 
@@ -77,11 +80,8 @@ def make_post(**kwargs) -> TempHistPost:
         summary="Mild temperatures across the city.",
         average=14.5,
         trend="stable",
-        slope=0.0,
-        slope_error=0.05,
         share_url="https://temphist.com/s/abc123",
         chart_image=b"\x89PNG",
-        chart_image_url="https://api.temphist.com/v1/og/abc123.png",
         units="celsius",
     )
     return TempHistPost(**{**defaults, **kwargs})
@@ -174,7 +174,7 @@ class TestFormatLocationPost:
 class TestFormatAggregatePost:
     def _make_agg(self, trends):
         summaries = [
-            LocationSummary(location=f"City{i}", average=15.0, trend=t, units="metric")
+            LocationSummary(location=f"City{i}", average=15.0, trend=t, units="celsius")
             for i, t in enumerate(trends)
         ]
         return AggregateData(date=date(2026, 4, 18), summaries=summaries)
@@ -210,7 +210,7 @@ class TestAggregateData:
         if averages is None:
             averages = [15.0] * len(trends)
         summaries = [
-            LocationSummary(location=f"City{i}", average=avg, trend=t, units="metric")
+            LocationSummary(location=f"City{i}", average=avg, trend=t, units="celsius")
             for i, (t, avg) in enumerate(zip(trends, averages))
         ]
         return AggregateData(date=date.today(), summaries=summaries)
@@ -320,10 +320,10 @@ class TestPeriodsDueToday:
         periods = periods_due_today(loc, monday)
         assert periods == ["today"]
 
-    def test_tier3_returns_empty(self):
+    def test_tier3_returns_today(self):
         loc = make_loc(tier=TIER_3)
         now = utc(2026, 6, 15, 16)
-        assert periods_due_today(loc, now) == []
+        assert periods_due_today(loc, now) == ["today"]
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +377,101 @@ class TestDeduplication:
         mark_posted("london", "today")
         today = date.today().isoformat()
         assert any(today in k for k in fake_redis._store)
+
+
+# ---------------------------------------------------------------------------
+# Remarkability
+# ---------------------------------------------------------------------------
+
+def _make_post(**kwargs) -> TempHistPost:
+    defaults = dict(
+        period="today",
+        location_id="london",
+        location="London",
+        country="GB",
+        summary="Test summary",
+        average=15.0,
+        trend="warming",
+        share_url="https://example.com/s/1",
+        chart_image=b"",
+        units="celsius",
+        ranking_warm=5,
+        ranking_cold=10,
+        gradient_factor=0.5,
+    )
+    defaults.update(kwargs)
+    return TempHistPost(**defaults)
+
+
+class TestRankingPoints:
+    def test_rank_1(self):
+        assert _ranking_points(1) == 10
+
+    def test_rank_2(self):
+        assert _ranking_points(2) == 6
+
+    def test_rank_3(self):
+        assert _ranking_points(3) == 4
+
+    def test_rank_4(self):
+        assert _ranking_points(4) == 3
+
+    def test_rank_5(self):
+        assert _ranking_points(5) == 2
+
+    def test_rank_6(self):
+        assert _ranking_points(6) == 1
+
+    def test_rank_7_and_above(self):
+        assert _ranking_points(7) == 0
+        assert _ranking_points(51) == 0
+
+
+class TestRemarkabilityScore:
+    def test_rank1_no_trend(self):
+        assert remarkability_score(1, 51, 0.0) == 10.0
+
+    def test_rank7_moderate_trend(self):
+        assert remarkability_score(7, 51, 0.3) == pytest.approx(3.0)
+
+    def test_uses_best_of_warm_cold(self):
+        # cold rank 2 beats warm rank 10
+        assert remarkability_score(10, 2, 0.0) == 6.0
+
+    def test_trend_adds_to_ranking(self):
+        score = remarkability_score(2, 51, 0.5)
+        assert score == pytest.approx(6.0 + 5.0)
+
+    def test_negative_gradient_factor_treated_as_absolute(self):
+        assert remarkability_score(7, 51, -0.5) == pytest.approx(5.0)
+
+
+class TestIsRemarkable:
+    def test_remarkable_when_score_meets_threshold(self):
+        post = _make_post(ranking_warm=1, ranking_cold=51, gradient_factor=0.0)
+        assert is_remarkable(post) is True
+
+    def test_not_remarkable_when_score_below_threshold(self):
+        post = _make_post(ranking_warm=7, ranking_cold=51, gradient_factor=0.3)
+        assert is_remarkable(post) is False
+
+    def test_exactly_at_threshold_is_remarkable(self):
+        # rank 6 (1 pt) + gf=0.9 (9.0) = 10.0 — meets threshold
+        post = _make_post(ranking_warm=6, ranking_cold=51, gradient_factor=0.9)
+        assert is_remarkable(post) is True
+
+    def test_missing_ranking_warm_returns_false(self):
+        post = _make_post(ranking_warm=None)
+        assert is_remarkable(post) is False
+
+    def test_missing_ranking_cold_returns_false(self):
+        post = _make_post(ranking_cold=None)
+        assert is_remarkable(post) is False
+
+    def test_missing_gradient_factor_returns_false(self):
+        post = _make_post(gradient_factor=None)
+        assert is_remarkable(post) is False
+
+    def test_custom_threshold(self):
+        post = _make_post(ranking_warm=7, ranking_cold=51, gradient_factor=0.3)
+        assert is_remarkable(post, threshold=3.0) is True
