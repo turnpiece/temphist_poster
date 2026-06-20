@@ -618,11 +618,10 @@ def post_location_period(
         text = format_location_post(data, max_chars=platform.MAX_CHARS)
 
         if dry_run:
-            log.info(
-                "[DRY RUN] %s | %s | %s (%d chars)\n%s\n  [image: %s]",
-                platform.name.upper(), loc_id, period, len(text),
-                text, data.chart_image_url,
-            )
+            log.info("[DRY RUN] %s | %s | %s (%d chars)", platform.name.upper(), loc_id, period, len(text))
+            for line in text.splitlines():
+                log.info("  %s", line)
+            log.info("  [image: %s]", data.chart_image_url)
             continue
 
         try:
@@ -651,10 +650,9 @@ def post_aggregate(platforms: list, locations: list, dry_run: bool = False) -> N
         text = format_aggregate_post(agg, max_chars=platform.MAX_CHARS)
 
         if dry_run:
-            log.info(
-                "[DRY RUN] %s | AGGREGATE (%d chars)\n%s",
-                platform.name.upper(), len(text), text,
-            )
+            log.info("[DRY RUN] %s | AGGREGATE (%d chars)", platform.name.upper(), len(text))
+            for line in text.splitlines():
+                log.info("  %s", line)
             continue
 
         try:
