@@ -178,7 +178,7 @@ TIER_SCHEDULE = {
 }
 
 # Aggregate weekly post fires on Fridays
-AGGREGATE_POST_DAY = 4  # 0=Mon
+AGGREGATE_POST_DAY = 4  # 0 is Monday
 
 # Local hour at which to post (24h)
 POST_HOUR_LOCAL = 16

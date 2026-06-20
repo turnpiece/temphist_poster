@@ -8,11 +8,13 @@ import re
 import subprocess
 import sys
 
+VERSION_FILE = "version.py"
+
 
 def get_current_version():
     """Get current version from version.py"""
     try:
-        with open("version.py", "r") as f:
+        with open(VERSION_FILE, "r") as f:
             content = f.read()
             match = re.search(r'__version__ = "([^"]+)"', content)
             if match:
@@ -53,7 +55,7 @@ def bump_version(current_version, bump_type):
 def update_version_file(new_version):
     """Update version.py with new version"""
     try:
-        with open("version.py", "r") as f:
+        with open(VERSION_FILE, "r") as f:
             content = f.read()
 
         # Update __version__
@@ -69,7 +71,7 @@ def update_version_file(new_version):
             content,
         )
 
-        with open("version.py", "w") as f:
+        with open(VERSION_FILE, "w") as f:
             f.write(content)
 
         print(f"✅ Updated version.py to {new_version}")
@@ -79,12 +81,11 @@ def update_version_file(new_version):
         sys.exit(1)
 
 
-
 def git_commit_and_tag(new_version):
     """Commit changes and create git tag"""
     try:
         # Add changed files
-        subprocess.run(["git", "add", "version.py"], check=True)  # noqa: S603, S607
+        subprocess.run(["git", "add", VERSION_FILE], check=True)  # noqa: S603, S607
 
         # Commit
         subprocess.run(
