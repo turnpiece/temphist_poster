@@ -137,6 +137,8 @@ class TempHistPost:
     summary: str
     average: float
     trend: str  # "warming" | "cooling" | "stable"
+    slope: float
+    slope_error: float | None
     share_url: str
     chart_image: bytes
     chart_image_url: str = ""
@@ -254,6 +256,7 @@ def fetch_temphist_data(
         summary = meta["summary"]
         average = meta["average"]["mean"]
         slope = meta["trend"]["slope"]
+        slope_error = meta["trend"].get("slope_error")
         gradient_factor = meta["trend"].get("gradient_factor")
         trend = classify_trend(slope)
         ranking = meta.get("ranking", {})
@@ -282,6 +285,8 @@ def fetch_temphist_data(
         summary=summary,
         average=average,
         trend=trend,
+        slope=slope,
+        slope_error=slope_error,
         share_url=f"{site_url()}{share['url']}",
         chart_image=chart_resp.content,
         chart_image_url=f"{base_url}/v1/og/{share['id']}.png",
@@ -362,7 +367,9 @@ def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
     body = (
         f"{label} in {post.location} {trend_icon}\n\n"
         f"{post.summary}\n\n"
-        f"Avg: {post.average:.1f}{sym} · Trend: {post.trend.capitalize()}\n\n"
+        f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):.2f}"
+        + (f" ± {post.slope_error:.2f}" if post.slope_error is not None else "")
+        + f" {sym}/decade\n\n"
         f"{tags} {loc_tag} #TempHist\n\n"
         f"{post.share_url}"
     )
