@@ -57,118 +57,6 @@ TIER_3 = "tier3"
 
 FAHRENHEIT_COUNTRIES = {"US"}
 
-LOCATIONS = [
-    # --- Tier 1: English-speaking, high-interest, full schedule ---
-    {
-        "id": "london",
-        "label": "London",
-        "tz": "Europe/London",
-        "country": "GB",
-        "tier": TIER_1,
-    },
-    {
-        "id": "new_york",
-        "label": "New York",
-        "tz": "America/New_York",
-        "country": "US",
-        "tier": TIER_1,
-    },
-    {
-        "id": "los_angeles",
-        "label": "Los Angeles",
-        "tz": "America/Los_Angeles",
-        "country": "US",
-        "tier": TIER_1,
-    },
-    {
-        "id": "chicago",
-        "label": "Chicago",
-        "tz": "America/Chicago",
-        "country": "US",
-        "tier": TIER_1,
-    },
-    {
-        "id": "sydney",
-        "label": "Sydney",
-        "tz": "Australia/Sydney",
-        "country": "AU",
-        "tier": TIER_1,
-    },
-    {
-        "id": "toronto",
-        "label": "Toronto",
-        "tz": "America/Toronto",
-        "country": "CA",
-        "tier": TIER_1,
-    },
-    {
-        "id": "dublin",
-        "label": "Dublin",
-        "tz": "Europe/Dublin",
-        "country": "IE",
-        "tier": TIER_1,
-    },
-    {
-        "id": "auckland",
-        "label": "Auckland",
-        "tz": "Pacific/Auckland",
-        "country": "NZ",
-        "tier": TIER_1,
-    },
-    # --- Tier 2: English widely spoken, daily only in v1 ---
-    {
-        "id": "singapore",
-        "label": "Singapore",
-        "tz": "Asia/Singapore",
-        "country": "SG",
-        "tier": TIER_2,
-    },
-    {
-        "id": "johannesburg",
-        "label": "Johannesburg",
-        "tz": "Africa/Johannesburg",
-        "country": "ZA",
-        "tier": TIER_2,
-    },
-    {
-        "id": "nairobi",
-        "label": "Nairobi",
-        "tz": "Africa/Nairobi",
-        "country": "KE",
-        "tier": TIER_2,
-    },
-    {
-        "id": "mumbai",
-        "label": "Mumbai",
-        "tz": "Asia/Kolkata",
-        "country": "IN",
-        "tier": TIER_2,
-    },
-    # --- Tier 3: conditional/remarkable posts only — v2 ---
-    # is_remarkable(loc, period) will gate these; skipped entirely in v1.
-    {
-        "id": "tokyo",
-        "label": "Tokyo",
-        "tz": "Asia/Tokyo",
-        "country": "JP",
-        "tier": TIER_3,
-    },
-    {
-        "id": "amsterdam",
-        "label": "Amsterdam",
-        "tz": "Europe/Amsterdam",
-        "country": "NL",
-        "tier": TIER_3,
-    },
-    {
-        "id": "dubai",
-        "label": "Dubai",
-        "tz": "Asia/Dubai",
-        "country": "AE",
-        "tier": TIER_3,
-    },
-]
-
 # Posting schedule per tier.
 # None   → every day
 # "first"→ 1st of month only
@@ -196,6 +84,33 @@ POST_HOUR_LOCAL = 16
 
 # ±minutes around POST_HOUR_LOCAL considered "due"
 POST_WINDOW_MINUTES = 15
+
+
+# ---------------------------------------------------------------------------
+# Location loader
+# ---------------------------------------------------------------------------
+
+
+def load_locations() -> list:
+    base_url = os.environ["TEMPHIST_API_URL"]
+    api_key = os.environ.get("TEMPHIST_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    log.info("loading locations from %s/v1/locations/preapproved", base_url)
+    with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
+        resp = client.get("/v1/locations/preapproved")
+        resp.raise_for_status()
+    locations = [
+        {
+            "id": loc["id"],
+            "label": loc["name"],
+            "tz": loc["timezone"],
+            "country": loc["country_code"],
+            "tier": loc["tier"],
+        }
+        for loc in resp.json()["locations"]
+    ]
+    log.info("loaded %d locations", len(locations))
+    return locations
 
 
 # ---------------------------------------------------------------------------
@@ -368,14 +283,14 @@ def fetch_temphist_data(
 
 
 def fetch_aggregate_data(
-    period: str = "today", now_utc: datetime | None = None
+    locations: list, period: str = "today", now_utc: datetime | None = None
 ) -> AggregateData:
     """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
     log.info("fetching aggregate data")
     base_url = os.environ["TEMPHIST_API_URL"]
     api_key = os.environ.get("TEMPHIST_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    tier1 = [loc for loc in LOCATIONS if loc["tier"] == TIER_1]
+    tier1 = [loc for loc in locations if loc["tier"] == TIER_1]
     summaries = []
     now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
 
@@ -712,13 +627,13 @@ def post_location_period(
         mark_posted(loc_id, period)
 
 
-def post_aggregate(platforms: list, dry_run: bool = False) -> None:
+def post_aggregate(platforms: list, locations: list, dry_run: bool = False) -> None:
     if not dry_run and already_posted("__aggregate__", "week"):
-        print("  skip aggregate — already posted today")
+        log.info("skip aggregate — already posted today")
         return
 
     try:
-        agg = fetch_aggregate_data(period="today")
+        agg = fetch_aggregate_data(locations, period="today")
     except Exception as exc:
         log.error("fetch aggregate failed: %s", exc)
         print(f"  ✗ fetch aggregate: {exc}", file=sys.stderr)
@@ -781,12 +696,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def _resolve_locations(location_arg: str | None) -> list:
+def _resolve_locations(location_arg: str | None, locations: list) -> list:
     if not location_arg:
-        return LOCATIONS
-    matched = [loc for loc in LOCATIONS if loc["id"] == location_arg]
+        return locations
+    matched = [loc for loc in locations if loc["id"] == location_arg]
     if not matched:
-        print(f"Unknown location: {location_arg}", file=sys.stderr)
+        log.error("unknown location: %s", location_arg)
         sys.exit(1)
     return matched
 
@@ -813,8 +728,9 @@ def main():
              args.dry_run, args.force, args.location, args.platforms)
     now_utc = datetime.now(tz=ZoneInfo("UTC"))
     log.info("now_utc=%s", now_utc.isoformat())
+    all_locations = load_locations()
     platforms = make_platforms(args.platforms, args.dry_run)
-    locations = _resolve_locations(args.location)
+    locations = _resolve_locations(args.location, all_locations)
 
     # Aggregate post (Friday, or forced)
     if args.force == "aggregate" or (
@@ -823,7 +739,7 @@ def main():
         and (args.dry_run or is_aggregate_due(now_utc))
     ):
         log.info("posting aggregate")
-        post_aggregate(platforms, dry_run=args.dry_run)
+        post_aggregate(platforms, all_locations, dry_run=args.dry_run)
     else:
         log.info("skipping aggregate (not due)")
 
