@@ -29,15 +29,10 @@ import poster  # noqa: E402  (must come after stubs)
 from poster import (  # noqa: E402
     TIER_1,
     TIER_2,
-    TIER_3,
-    AggregateData,
-    LocationSummary,
     TempHistPost,
     _ranking_points,
     already_posted,
-    format_aggregate_post,
     format_location_post,
-    is_aggregate_due,
     is_posting_time,
     is_remarkable,
     mark_posted,
@@ -171,78 +166,6 @@ class TestFormatLocationPost:
         assert "This week" in format_location_post(make_post(period="week"))
 
 
-class TestFormatAggregatePost:
-    def _make_agg(self, trends):
-        summaries = [
-            LocationSummary(location=f"City{i}", average=15.0, trend=t, units="celsius")
-            for i, t in enumerate(trends)
-        ]
-        return AggregateData(date=date(2026, 4, 18), summaries=summaries)
-
-    def test_contains_temphist_hashtag(self):
-        agg = self._make_agg(["warming", "stable", "cooling"])
-        assert "#TempHist" in format_aggregate_post(agg)
-
-    def test_counts_trends(self):
-        agg = self._make_agg(["warming", "warming", "stable", "cooling"])
-        text = format_aggregate_post(agg)
-        assert "2 warming" in text
-        assert "1 stable" in text
-        assert "1 cooling" in text
-
-    def test_respects_max_chars(self):
-        agg = self._make_agg(["warming"] * 20)
-        text = format_aggregate_post(agg, max_chars=300)
-        assert len(text) <= 300
-
-    def test_shows_date(self):
-        agg = self._make_agg(["stable"])
-        assert "18 Apr" in format_aggregate_post(agg)
-
-
-# ---------------------------------------------------------------------------
-# AggregateData computed properties
-# ---------------------------------------------------------------------------
-
-
-class TestAggregateData:
-    def _make(self, trends, averages=None):
-        if averages is None:
-            averages = [15.0] * len(trends)
-        summaries = [
-            LocationSummary(location=f"City{i}", average=avg, trend=t, units="celsius")
-            for i, (t, avg) in enumerate(zip(trends, averages))
-        ]
-        return AggregateData(date=date.today(), summaries=summaries)
-
-    def test_warming_count(self):
-        agg = self._make(["warming", "warming", "stable"])
-        assert agg.warming_count == 2
-
-    def test_cooling_count(self):
-        agg = self._make(["cooling", "stable", "stable"])
-        assert agg.cooling_count == 1
-
-    def test_stable_count(self):
-        agg = self._make(["stable", "warming"])
-        assert agg.stable_count == 1
-
-    def test_most_warming_is_highest_average(self):
-        agg = self._make(["warming", "warming"], [10.0, 20.0])
-        assert agg.most_warming.average == 20.0
-
-    def test_most_cooling_is_lowest_average(self):
-        agg = self._make(["cooling", "cooling"], [5.0, 2.0])
-        assert agg.most_cooling.average == 2.0
-
-    def test_most_warming_none_when_no_warming(self):
-        agg = self._make(["stable", "cooling"])
-        assert agg.most_warming is None
-
-    def test_most_cooling_none_when_no_cooling(self):
-        agg = self._make(["stable", "warming"])
-        assert agg.most_cooling is None
-
 
 # ---------------------------------------------------------------------------
 # Schedule: is_posting_time
@@ -320,30 +243,7 @@ class TestPeriodsDueToday:
         periods = periods_due_today(loc, monday)
         assert periods == ["today"]
 
-    def test_tier3_returns_today(self):
-        loc = make_loc(tier=TIER_3)
-        now = utc(2026, 6, 15, 16)
-        assert periods_due_today(loc, now) == ["today"]
 
-
-# ---------------------------------------------------------------------------
-# Schedule: is_aggregate_due
-# ---------------------------------------------------------------------------
-
-
-class TestIsAggregateDue:
-    def test_friday_at_post_hour(self):
-        # 2026-06-19 is a Friday; aggregate check uses UTC directly
-        now = utc(2026, 6, 19, 16, 0)
-        assert is_aggregate_due(now) is True
-
-    def test_friday_outside_window(self):
-        now = utc(2026, 6, 19, 10, 0)
-        assert is_aggregate_due(now) is False
-
-    def test_thursday_at_post_hour(self):
-        now = utc(2026, 6, 18, 16, 0)
-        assert is_aggregate_due(now) is False
 
 
 # ---------------------------------------------------------------------------

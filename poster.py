@@ -1,6 +1,6 @@
 """
 TempHist Social Media Poster
-Posts temperature history summaries and cross-location aggregates to social media.
+Posts temperature history summaries to social media.
 
 Usage:
     python poster.py                    # run normally (checks schedule)
@@ -74,9 +74,6 @@ TIER_SCHEDULE = {
     },
 }
 
-# Aggregate weekly post fires on Fridays
-AGGREGATE_POST_DAY = 4  # 0 is Monday
-
 # Local hour at which to post (24h)
 POST_HOUR_LOCAL = 16
 
@@ -149,43 +146,6 @@ class TempHistPost:
     ranking_cold: int | None = None
     gradient_factor: float | None = None
 
-
-@dataclass
-class LocationSummary:
-    """Lightweight summary used for the aggregate post — no image needed."""
-
-    location: str
-    average: float
-    trend: str
-    units: str
-
-
-@dataclass
-class AggregateData:
-    date: date
-    summaries: list
-
-    @property
-    def warming_count(self):
-        return sum(1 for s in self.summaries if s.trend.lower() == "warming")
-
-    @property
-    def cooling_count(self):
-        return sum(1 for s in self.summaries if s.trend.lower() == "cooling")
-
-    @property
-    def stable_count(self):
-        return sum(1 for s in self.summaries if s.trend.lower() == "stable")
-
-    @property
-    def most_warming(self):
-        warming = [s for s in self.summaries if s.trend.lower() == "warming"]
-        return max(warming, key=lambda s: s.average, default=None)
-
-    @property
-    def most_cooling(self):
-        cooling = [s for s in self.summaries if s.trend.lower() == "cooling"]
-        return min(cooling, key=lambda s: s.average, default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -303,40 +263,6 @@ def fetch_temphist_data(
     )
 
 
-def fetch_aggregate_data(
-    locations: list, period: str = "today", now_utc: datetime | None = None
-) -> AggregateData:
-    """Fetch lightweight summaries for all tier 1 locations (no chart images)."""
-    log.info("fetching aggregate data")
-    base_url = os.environ["TEMPHIST_API_URL"]
-    api_key = os.environ.get("TEMPHIST_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    tier1 = [loc for loc in locations if loc["tier"] == TIER_1]
-    summaries = []
-    now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
-
-    with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        for loc in tier1:
-            units = preferred_units(loc["country"])
-            identifier = record_identifier(loc, now)
-            api_period = PERIOD_API_NAMES[period]
-            resp = client.get(
-                f"/v1/records/{api_period}/{loc['id']}/{identifier}/meta",
-                params={"unit_group": units},
-            )
-            if resp.is_success:
-                meta = resp.json()["data"]
-                summaries.append(
-                    LocationSummary(
-                        location=loc["label"],
-                        average=meta["average"]["mean"],
-                        trend=classify_trend(meta["trend"]["slope"]),
-                        units=units,
-                    )
-                )
-
-    return AggregateData(date=now.date(), summaries=summaries)
-
 
 # ---------------------------------------------------------------------------
 # Post formatters
@@ -404,44 +330,6 @@ def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
     return body
 
 
-def format_aggregate_post(agg: AggregateData, max_chars: int = 300) -> str:
-    """
-    Weekly cross-location climate snapshot. Text only — no image.
-
-    Example:
-        🌍 TempHist weekly snapshot — 18 Apr
-
-        8 locations today:
-        📈 5 warming · ➡️ 2 stable · ❄️ 1 cooling
-
-        Fastest warming: London
-        Most cooling: Auckland
-
-        #ClimateData #ClimateChange #TempHist
-    """
-    today = agg.date.strftime("%-d %b")
-    warmest = agg.most_warming
-    coolest = agg.most_cooling
-
-    lines = [
-        f"🌍 TempHist weekly snapshot — {today}",
-        "",
-        f"{len(agg.summaries)} locations today:",
-        f"📈 {agg.warming_count} warming · ➡️ {agg.stable_count} stable · ❄️ {agg.cooling_count} cooling",
-    ]
-
-    if warmest:
-        lines.append(f"\nFastest warming: {warmest.location}")
-    if coolest:
-        lines.append(f"Most cooling: {coolest.location}")
-
-    lines += [
-        "",
-        "#ClimateData #ClimateChange #TempHist",
-    ]
-
-    return "\n".join(lines)[:max_chars]
-
 
 # ---------------------------------------------------------------------------
 # Deduplication
@@ -498,13 +386,6 @@ def periods_due_today(loc: dict, now_utc: datetime) -> list:
 
     return due
 
-
-def is_aggregate_due(now_utc: datetime) -> bool:
-    return (
-        now_utc.weekday() == AGGREGATE_POST_DAY
-        and abs(now_utc.hour * 60 + now_utc.minute - POST_HOUR_LOCAL * 60)
-        <= POST_WINDOW_MINUTES
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +507,12 @@ def post_location_period(
         return
 
     if loc["tier"] == TIER_2 and not is_remarkable(data):
-        log.info("skip %s/%s — not remarkable", loc_id, period)
+        if dry_run and data.ranking_warm is not None and data.ranking_cold is not None and data.gradient_factor is not None:
+            score = remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor)
+            log.info("[DRY RUN] skip %s/%s — not remarkable (score=%.1f, warm_rank=%s, cold_rank=%s, gf=%.2f)",
+                     loc_id, period, score, data.ranking_warm, data.ranking_cold, data.gradient_factor)
+        else:
+            log.info("skip %s/%s — not remarkable", loc_id, period)
         return
 
     sym = unit_symbol(data.units)
@@ -655,36 +541,6 @@ def post_location_period(
         mark_posted(loc_id, period)
 
 
-def post_aggregate(platforms: list, locations: list, dry_run: bool = False) -> None:
-    if not dry_run and already_posted("__aggregate__", "week"):
-        log.info("skip aggregate — already posted today")
-        return
-
-    try:
-        agg = fetch_aggregate_data(locations, period="today")
-    except Exception as exc:
-        log.error("fetch aggregate failed: %s", exc)
-        print(f"  ✗ fetch aggregate: {exc}", file=sys.stderr)
-        return
-
-    for platform in platforms:
-        text = format_aggregate_post(agg, max_chars=platform.MAX_CHARS)
-
-        if dry_run:
-            log.info("[DRY RUN] %s | AGGREGATE (%d chars)", platform.name.upper(), len(text))
-            for line in text.splitlines():
-                log.info("  %s", line)
-            continue
-
-        try:
-            url = platform.post_text(text)
-            print(f"  ✓ {platform.name} | aggregate: {url}")
-        except Exception as exc:
-            print(f"  ✗ {platform.name} | aggregate: {exc}", file=sys.stderr)
-
-    if not dry_run:
-        mark_posted("__aggregate__", "week")
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -710,7 +566,7 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--force",
-        choices=["today", "week", "month", "year", "aggregate"],
+        choices=["today", "week", "month", "year"],
         help="Force a specific period, bypassing schedule check",
     )
     parser.add_argument("--location", help="Run for one location ID only")
@@ -740,7 +596,7 @@ def _periods_for_location(
     now_utc: datetime,
     dry_run: bool = False,
 ) -> list:
-    if force and force != "aggregate":
+    if force:
         return [force]
     if dry_run or is_posting_time(loc, now_utc):
         return periods_due_today(loc, now_utc)
@@ -756,17 +612,6 @@ def main():
     all_locations = load_locations()
     platforms = make_platforms(args.platforms, args.dry_run)
     locations = _resolve_locations(args.location, all_locations)
-
-    # Aggregate post (Friday, or forced)
-    if args.force == "aggregate" or (
-        not args.force
-        and not args.location
-        and (args.dry_run or is_aggregate_due(now_utc))
-    ):
-        log.info("posting aggregate")
-        post_aggregate(platforms, all_locations, dry_run=args.dry_run)
-    else:
-        log.info("skipping aggregate (not due)")
 
     # Per-location posts
     for loc in locations:
