@@ -22,6 +22,7 @@ for mod in ("atproto", "mastodon", "Mastodon"):
 if "redis" not in sys.modules:
     _redis_mod = types.ModuleType("redis")
     _redis_mod.from_url = lambda url: None  # poster.r patched per-test
+    _redis_mod.Redis = object
     sys.modules["redis"] = _redis_mod
 
 import poster  # noqa: E402  (must come after stubs)
@@ -75,6 +76,10 @@ def make_post(**kwargs) -> TempHistPost:
         summary="Mild temperatures across the city.",
         average=14.5,
         trend="stable",
+        slope=0.0,
+        slope_error=None,
+        anomaly=None,
+        anomaly_std_dev=None,
         share_url="https://temphist.com/s/abc123",
         chart_image=b"\x89PNG",
         units="celsius",
@@ -142,12 +147,12 @@ class TestFormatLocationPost:
         assert "#NewYork" in text
 
     def test_warming_trend_emoji(self):
-        text = format_location_post(make_post(trend="warming"))
+        text = format_location_post(make_post(trend="warming", slope=0.5))
         assert "📈" in text
 
     def test_cooling_trend_emoji(self):
-        text = format_location_post(make_post(trend="cooling"))
-        assert "❄️" in text
+        text = format_location_post(make_post(trend="cooling", slope=-0.5))
+        assert "📉" in text
 
     def test_long_summary_truncated_to_max_chars(self):
         long_summary = "X" * 500
@@ -237,11 +242,11 @@ class TestPeriodsDueToday:
         assert "month" in periods
         assert "year" in periods
 
-    def test_tier2_only_returns_today(self):
+    def test_tier2_returns_full_schedule(self):
         loc = make_loc(tier=TIER_2)
         monday = utc(2026, 6, 15, 16)
         periods = periods_due_today(loc, monday)
-        assert periods == ["today"]
+        assert periods == ["today", "week"]
 
 
 
@@ -255,7 +260,7 @@ class TestDeduplication:
     @pytest.fixture(autouse=True)
     def fake_redis(self):
         fr = FakeRedis()
-        with patch.object(poster, "r", fr):
+        with patch.object(poster, "_redis", return_value=fr):
             yield fr
 
     def test_not_posted_initially(self):
@@ -292,6 +297,10 @@ def _make_post(**kwargs) -> TempHistPost:
         summary="Test summary",
         average=15.0,
         trend="warming",
+        slope=0.1,
+        slope_error=None,
+        anomaly=None,
+        anomaly_std_dev=None,
         share_url="https://example.com/s/1",
         chart_image=b"",
         units="celsius",

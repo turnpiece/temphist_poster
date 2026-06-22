@@ -284,50 +284,58 @@ PERIOD_TAGS = {
 }
 
 
-def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
-    if post.anomaly is not None and post.anomaly_std_dev is not None:
-        if post.anomaly > post.anomaly_std_dev:
-            anomaly_icon = "🌡️"
-        elif post.anomaly < -post.anomaly_std_dev:
-            anomaly_icon = "❄️"
-        else:
-            anomaly_icon = ""
-    else:
-        anomaly_icon = ""
+def _anomaly_icon(post: TempHistPost) -> str:
+    if post.anomaly is None or post.anomaly_std_dev is None:
+        return ""
+    if post.anomaly > post.anomaly_std_dev:
+        return "🌡️"
+    if post.anomaly < -post.anomaly_std_dev:
+        return "❄️"
+    return ""
 
+
+def _trend_icon(post: TempHistPost) -> str:
     if post.slope_error is not None:
         if post.slope > post.slope_error:
-            trend_icon = "📈"
-        elif post.slope < -post.slope_error:
-            trend_icon = "📉"
-        else:
-            trend_icon = ""
-    else:
-        trend_icon = "📈" if post.slope > 0 else ("📉" if post.slope < 0 else "")
+            return "📈"
+        if post.slope < -post.slope_error:
+            return "📉"
+        return ""
+    return "📈" if post.slope > 0 else ("📉" if post.slope < 0 else "")
 
-    icons = anomaly_icon + trend_icon
+
+def _build_post_body(post: TempHistPost) -> str:
+    icons = _anomaly_icon(post) + _trend_icon(post)
     label = PERIOD_LABELS.get(post.period, post.period.capitalize())
     sym = unit_symbol(post.units)
     tags = PERIOD_TAGS.get(post.period, "#weather")
     loc_tag = f"#{post.location.replace(' ', '')}"
+    slope_sign = "+" if post.slope > 0 else ("-" if post.slope < 0 else "")
+    slope_str = f"{slope_sign}{abs(post.slope):.2f}"
+    if post.slope_error is not None:
+        slope_str += f" ± {post.slope_error:.2f}"
 
-    body = (
+    return (
         f"{label} in {post.location}{' ' + icons if icons else ''}\n\n"
         f"{post.summary}\n\n"
-        f"Average: {post.average:.1f}{sym} · Trend: {'+' if post.slope > 0 else ('-' if post.slope < 0 else '')}{abs(post.slope):.2f}"
-        + (f" ± {post.slope_error:.2f}" if post.slope_error is not None else "")
-        + f" {sym}/decade\n\n"
+        f"Average: {post.average:.1f}{sym} · Trend: {slope_str} {sym}/decade\n\n"
         f"{tags} {loc_tag} #TempHist\n\n"
         f"{post.share_url}"
     )
 
-    if len(body) > max_chars:
-        overhead = len(body) - len(post.summary)
-        allowed = max_chars - overhead - 3
-        trimmed = post.summary[: max(0, allowed)] + "..."
-        body = body.replace(post.summary, trimmed)
 
-    return body
+def _trim_to_limit(body: str, summary: str, max_chars: int) -> str:
+    if len(body) <= max_chars:
+        return body
+    overhead = len(body) - len(summary)
+    allowed = max_chars - overhead - 3
+    trimmed = summary[: max(0, allowed)] + "..."
+    return body.replace(summary, trimmed)
+
+
+def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
+    body = _build_post_body(post)
+    return _trim_to_limit(body, post.summary, max_chars)
 
 
 
