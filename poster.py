@@ -91,11 +91,20 @@ def load_locations() -> list:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     log.info("loading locations from API")
 
-    with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-        pre_resp = client.get("/v1/locations/preapproved")
-        pre_resp.raise_for_status()
-        pop_resp = client.get("/v1/locations/popular")
-        pop_resp.raise_for_status()
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
+            pre_resp = client.get("/v1/locations/preapproved")
+            pre_resp.raise_for_status()
+            pop_resp = client.get("/v1/locations/popular")
+            pop_resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        hint = " — check TEMPHIST_API_KEY" if status in (401, 403) else ""
+        log.error("API error %d for %s%s", status, exc.request.url, hint)
+        raise
+    except httpx.RequestError as exc:
+        log.error("API connection failed for %s: %s", exc.request.url, exc)
+        raise
 
     def _to_loc(raw: dict, tier: str) -> dict:
         return {
