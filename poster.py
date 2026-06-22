@@ -228,7 +228,7 @@ def fetch_temphist_data(
         share_resp = client.post(
             "/v1/shares",
             json={
-                "location": loc["id"],
+                "location": loc["label"],
                 "period": api_period,
                 "identifier": identifier,
                 "ref_year": ref_year,
