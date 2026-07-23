@@ -455,9 +455,8 @@ class BlueskyPlatform(SocialPlatform):
         )
 
     def post_with_image(self, text: str, image: bytes, alt_text: str = "") -> str:
-        upload = self.client.upload_blob(image)
         response = self.client.send_image(
-            text=text, image=upload.blob, image_alt=alt_text
+            text=text, image=image, image_alt=alt_text
         )
         rkey = response.uri.split("/")[-1]
         return f"https://bsky.app/profile/{os.environ['BLUESKY_HANDLE']}/post/{rkey}"
