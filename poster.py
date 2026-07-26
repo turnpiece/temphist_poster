@@ -313,7 +313,7 @@ def _trend_icon(post: TempHistPost) -> str:
     return "📈" if post.slope > 0 else ("📉" if post.slope < 0 else "")
 
 
-def _build_post_body(post: TempHistPost) -> str:
+def _build_post_body(post: TempHistPost, include_url: bool = True) -> str:
     icons = _anomaly_icon(post) + _trend_icon(post)
     label = PERIOD_LABELS.get(post.period, post.period.capitalize())
     sym = unit_symbol(post.units)
@@ -324,13 +324,15 @@ def _build_post_body(post: TempHistPost) -> str:
     if post.slope_error is not None:
         slope_str += f" ± {post.slope_error:.2f}"
 
-    return (
+    body = (
         f"{label} in {post.location}{' ' + icons if icons else ''}\n\n"
         f"{post.summary}\n\n"
         f"Average: {post.average:.1f}{sym} · Trend: {slope_str} {sym}/decade\n\n"
-        f"{tags} {loc_tag} #TempHist\n\n"
-        f"{post.share_url}"
+        f"{tags} {loc_tag} #TempHist"
     )
+    if include_url:
+        body += f"\n\n{post.share_url}"
+    return body
 
 
 def _trim_to_limit(body: str, summary: str, max_chars: int) -> str:
@@ -342,8 +344,8 @@ def _trim_to_limit(body: str, summary: str, max_chars: int) -> str:
     return body.replace(summary, trimmed)
 
 
-def format_location_post(post: TempHistPost, max_chars: int = 300) -> str:
-    body = _build_post_body(post)
+def format_location_post(post: TempHistPost, max_chars: int = 300, include_url: bool = True) -> str:
+    body = _build_post_body(post, include_url=include_url)
     return _trim_to_limit(body, post.summary, max_chars)
 
 
@@ -433,9 +435,18 @@ def is_remarkable(data: TempHistPost, threshold: float = 10.0) -> bool:
 class SocialPlatform(ABC):
     name: str
     MAX_CHARS: int
+    LINK_IN_TEXT: bool = True  # whether the share URL should appear in the post text
 
     @abstractmethod
-    def post_with_image(self, text: str, image: bytes, alt_text: str = "") -> str: ...
+    def post_with_image(
+        self,
+        text: str,
+        image: bytes,
+        alt_text: str = "",
+        link_url: str = "",
+        link_title: str = "",
+        link_description: str = "",
+    ) -> str: ...
 
     @abstractmethod
     def post_text(self, text: str) -> str: ...
@@ -444,6 +455,7 @@ class SocialPlatform(ABC):
 class BlueskyPlatform(SocialPlatform):
     name = "bluesky"
     MAX_CHARS = 300
+    LINK_IN_TEXT = False  # share URL is carried by the link-card embed instead
 
     def __init__(self):
         from atproto import Client
@@ -454,10 +466,27 @@ class BlueskyPlatform(SocialPlatform):
             os.environ["BLUESKY_APP_PASSWORD"],
         )
 
-    def post_with_image(self, text: str, image: bytes, alt_text: str = "") -> str:
-        response = self.client.send_image(
-            text=text, image=image, image_alt=alt_text
+    def post_with_image(
+        self,
+        text: str,
+        image: bytes,
+        alt_text: str = "",
+        link_url: str = "",
+        link_title: str = "",
+        link_description: str = "",
+    ) -> str:
+        from atproto import models
+
+        upload = self.client.upload_blob(image)
+        embed = models.AppBskyEmbedExternal.Main(
+            external=models.AppBskyEmbedExternal.External(
+                uri=link_url,
+                title=link_title,
+                description=link_description,
+                thumb=upload.blob,
+            )
         )
+        response = self.client.send_post(text=text, embed=embed)
         rkey = response.uri.split("/")[-1]
         return f"https://bsky.app/profile/{os.environ['BLUESKY_HANDLE']}/post/{rkey}"
 
@@ -479,7 +508,15 @@ class MastodonPlatform(SocialPlatform):
             api_base_url=os.environ["MASTODON_API_BASE_URL"],
         )
 
-    def post_with_image(self, text: str, image: bytes, alt_text: str = "") -> str:
+    def post_with_image(
+        self,
+        text: str,
+        image: bytes,
+        alt_text: str = "",
+        link_url: str = "",
+        link_title: str = "",
+        link_description: str = "",
+    ) -> str:
         media = self.client.media_post(
             BytesIO(image), mime_type="image/png", description=alt_text
         )
@@ -536,19 +573,30 @@ def post_location_period(
         f"Temperature chart for {data.location}, {PERIOD_LABELS[period].lower()}. "
         f"Avg {data.average:.1f}{sym}, trend: {data.trend}."
     )
+    link_title = f"{data.location} · {PERIOD_LABELS[period]} | TempHist"
+    link_description = data.summary
 
     for platform in platforms:
-        text = format_location_post(data, max_chars=platform.MAX_CHARS)
+        text = format_location_post(data, max_chars=platform.MAX_CHARS, include_url=platform.LINK_IN_TEXT)
 
         if dry_run:
             log.info("[DRY RUN] %s | %s | %s (%d chars)", platform.name.upper(), loc_id, period, len(text))
             for line in text.splitlines():
                 log.info("  %s", line)
             log.info("  [image: %s]", data.chart_image_url)
+            if not platform.LINK_IN_TEXT:
+                log.info("  [card: %s | %s -> %s]", link_title, link_description, data.share_url)
             continue
 
         try:
-            url = platform.post_with_image(text, data.chart_image, alt_text)
+            url = platform.post_with_image(
+                text,
+                data.chart_image,
+                alt_text,
+                link_url=data.share_url,
+                link_title=link_title,
+                link_description=link_description,
+            )
             print(f"  ✓ {platform.name} | {loc_id} | {period}: {url}")
         except Exception as exc:
             print(f"  ✗ {platform.name} | {loc_id} | {period}: {exc}", file=sys.stderr)
@@ -572,6 +620,7 @@ def make_platforms(names: list, dry_run: bool) -> list:
             obj = object.__new__(cls)
             obj.name = cls.name
             obj.MAX_CHARS = cls.MAX_CHARS
+            obj.LINK_IN_TEXT = cls.LINK_IN_TEXT
             platforms.append(obj)
         return platforms
     return [PLATFORMS[name]() for name in names]

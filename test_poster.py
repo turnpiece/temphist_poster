@@ -139,6 +139,10 @@ class TestFormatLocationPost:
         text = format_location_post(make_post())
         assert "https://temphist.com/s/abc123" in text
 
+    def test_excludes_share_url_when_include_url_false(self):
+        text = format_location_post(make_post(), include_url=False)
+        assert "https://temphist.com/s/abc123" not in text
+
     def test_contains_temphist_hashtag(self):
         assert "#TempHist" in format_location_post(make_post())
 
