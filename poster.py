@@ -436,6 +436,7 @@ class SocialPlatform(ABC):
     name: str
     MAX_CHARS: int
     LINK_IN_TEXT: bool = True  # whether the share URL should appear in the post text
+    ATTACH_MEDIA: bool = True  # whether to upload/attach the chart image as post media
 
     @abstractmethod
     def post_with_image(
@@ -499,6 +500,7 @@ class BlueskyPlatform(SocialPlatform):
 class MastodonPlatform(SocialPlatform):
     name = "mastodon"
     MAX_CHARS = 500
+    ATTACH_MEDIA = False  # media attachments block Mastodon's link-card crawler
 
     def __init__(self):
         from mastodon import Mastodon
@@ -583,20 +585,26 @@ def post_location_period(
             log.info("[DRY RUN] %s | %s | %s (%d chars)", platform.name.upper(), loc_id, period, len(text))
             for line in text.splitlines():
                 log.info("  %s", line)
-            log.info("  [image: %s]", data.chart_image_url)
+            if platform.ATTACH_MEDIA:
+                log.info("  [image: %s]", data.chart_image_url)
             if not platform.LINK_IN_TEXT:
                 log.info("  [card: %s | %s -> %s]", link_title, link_description, data.share_url)
+            elif not platform.ATTACH_MEDIA:
+                log.info("  [%s will crawl %s for a link-preview card]", platform.name, data.share_url)
             continue
 
         try:
-            url = platform.post_with_image(
-                text,
-                data.chart_image,
-                alt_text,
-                link_url=data.share_url,
-                link_title=link_title,
-                link_description=link_description,
-            )
+            if platform.ATTACH_MEDIA:
+                url = platform.post_with_image(
+                    text,
+                    data.chart_image,
+                    alt_text,
+                    link_url=data.share_url,
+                    link_title=link_title,
+                    link_description=link_description,
+                )
+            else:
+                url = platform.post_text(text)
             print(f"  ✓ {platform.name} | {loc_id} | {period}: {url}")
         except Exception as exc:
             print(f"  ✗ {platform.name} | {loc_id} | {period}: {exc}", file=sys.stderr)
@@ -621,6 +629,7 @@ def make_platforms(names: list, dry_run: bool) -> list:
             obj.name = cls.name
             obj.MAX_CHARS = cls.MAX_CHARS
             obj.LINK_IN_TEXT = cls.LINK_IN_TEXT
+            obj.ATTACH_MEDIA = cls.ATTACH_MEDIA
             platforms.append(obj)
         return platforms
     return [PLATFORMS[name]() for name in names]
