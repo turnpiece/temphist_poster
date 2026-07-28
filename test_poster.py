@@ -36,9 +36,12 @@ from poster import (  # noqa: E402
     format_location_post,
     is_posting_time,
     is_remarkable,
+    is_scheduled_period,
     mark_posted,
+    mark_record_reposted,
     periods_due_today,
     preferred_units,
+    record_repost_on_cooldown,
     remarkability_score,
     unit_symbol,
 )
@@ -246,11 +249,45 @@ class TestPeriodsDueToday:
         assert "month" in periods
         assert "year" in periods
 
+    def test_month_and_year_are_due_every_day_opportunistically(self):
+        loc = make_loc(tier=TIER_1)
+        mid_month = utc(2026, 6, 16, 16)
+        periods = periods_due_today(loc, mid_month)
+        assert "month" in periods
+        assert "year" in periods
+
     def test_tier2_returns_full_schedule(self):
         loc = make_loc(tier=TIER_2)
         monday = utc(2026, 6, 15, 16)
         periods = periods_due_today(loc, monday)
-        assert periods == ["today", "week"]
+        assert set(periods) == {"today", "week", "month", "year"}
+
+    def test_tier2_month_year_due_on_non_first_day_too(self):
+        loc = make_loc(tier=TIER_2)
+        mid_month = utc(2026, 6, 16, 16)
+        periods = periods_due_today(loc, mid_month)
+        assert set(periods) == {"today", "month", "year"}
+
+
+class TestIsScheduledPeriod:
+    def test_today_always_scheduled(self):
+        loc = make_loc(tier=TIER_1)
+        assert is_scheduled_period(loc, "today", utc(2026, 6, 16, 16)) is True
+
+    def test_week_scheduled_on_monday_only(self):
+        loc = make_loc(tier=TIER_1)
+        assert is_scheduled_period(loc, "week", utc(2026, 6, 15, 16)) is True  # Monday
+        assert is_scheduled_period(loc, "week", utc(2026, 6, 16, 16)) is False  # Tuesday
+
+    def test_month_scheduled_on_first_only(self):
+        loc = make_loc(tier=TIER_1)
+        assert is_scheduled_period(loc, "month", utc(2026, 6, 1, 16)) is True
+        assert is_scheduled_period(loc, "month", utc(2026, 6, 16, 16)) is False
+
+    def test_year_scheduled_on_first_only(self):
+        loc = make_loc(tier=TIER_1)
+        assert is_scheduled_period(loc, "year", utc(2026, 6, 1, 16)) is True
+        assert is_scheduled_period(loc, "year", utc(2026, 6, 16, 16)) is False
 
 
 
@@ -286,6 +323,49 @@ class TestDeduplication:
         mark_posted("london", "today")
         today = date.today().isoformat()
         assert any(today in k for k in fake_redis._store)
+
+
+class TestRecordRepostCooldown:
+    @pytest.fixture(autouse=True)
+    def fake_redis(self):
+        fr = FakeRedis()
+        with patch.object(poster, "_redis", return_value=fr):
+            yield fr
+
+    def test_not_on_cooldown_initially(self):
+        loc = make_loc(tier=TIER_2)
+        assert record_repost_on_cooldown(loc, "month", utc(2026, 6, 16, 16)) is False
+
+    def test_on_cooldown_after_marking(self):
+        loc = make_loc(tier=TIER_2)
+        now = utc(2026, 6, 16, 16)
+        mark_record_reposted(loc, "month", now)
+        assert record_repost_on_cooldown(loc, "month", now) is True
+
+    def test_cooldown_scoped_per_month_not_per_day(self):
+        loc = make_loc(tier=TIER_2)
+        mark_record_reposted(loc, "month", utc(2026, 6, 16, 16))
+        # Still within the same month a few days later -> still on cooldown.
+        assert record_repost_on_cooldown(loc, "month", utc(2026, 6, 20, 16)) is True
+        # A new month is a different scope -> not on cooldown.
+        assert record_repost_on_cooldown(loc, "month", utc(2026, 7, 1, 16)) is False
+
+    def test_cooldown_scoped_per_year_not_per_day(self):
+        loc = make_loc(tier=TIER_2)
+        mark_record_reposted(loc, "year", utc(2026, 6, 16, 16))
+        assert record_repost_on_cooldown(loc, "year", utc(2026, 12, 1, 16)) is True
+        assert record_repost_on_cooldown(loc, "year", utc(2027, 1, 1, 16)) is False
+
+    def test_different_period_not_affected(self):
+        loc = make_loc(tier=TIER_2)
+        now = utc(2026, 6, 16, 16)
+        mark_record_reposted(loc, "month", now)
+        assert record_repost_on_cooldown(loc, "year", now) is False
+
+    def test_different_location_not_affected(self):
+        now = utc(2026, 6, 16, 16)
+        mark_record_reposted(make_loc(id="london"), "month", now)
+        assert record_repost_on_cooldown(make_loc(id="paris"), "month", now) is False
 
 
 # ---------------------------------------------------------------------------

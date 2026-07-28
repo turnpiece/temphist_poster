@@ -80,6 +80,15 @@ POST_HOUR_LOCAL = 16
 # ±minutes around POST_HOUR_LOCAL considered "due"
 POST_WINDOW_MINUTES = 15
 
+# Periods whose rolling window can become record-setting on any day, not just
+# the 1st of the month — checked daily (for both tiers) as well as on their
+# regular "first" schedule, gated by remarkability.
+OPPORTUNISTIC_PERIODS = {"month", "year"}
+
+# Minimum days between opportunistic reposts of a still-standing month/year
+# record, so a record that holds for weeks doesn't get posted every day.
+RECORD_REPOST_COOLDOWN_DAYS = 10
+
 
 # ---------------------------------------------------------------------------
 # Location loader
@@ -379,6 +388,26 @@ def mark_posted(location_id: str, period: str) -> None:
     _redis().set(key, datetime.now().isoformat(), ex=60 * 60 * 24 * 35)  # 35-day TTL
 
 
+def _record_scope(loc: dict, period: str, now_utc: datetime) -> str:
+    """Identifier for the rolling window a record belongs to, so reposts are
+    deduped per window instance (e.g. one cooldown per calendar month/year)
+    rather than per calendar day."""
+    local = now_utc.astimezone(ZoneInfo(loc["tz"]))
+    return f"{local.year}-{local.month:02d}" if period == "month" else f"{local.year}"
+
+
+def record_repost_on_cooldown(loc: dict, period: str, now_utc: datetime) -> bool:
+    scope = _record_scope(loc, period, now_utc)
+    key = f"poster:record-cooldown:{loc['id']}:{period}:{scope}"
+    return bool(_redis().exists(key))
+
+
+def mark_record_reposted(loc: dict, period: str, now_utc: datetime) -> None:
+    scope = _record_scope(loc, period, now_utc)
+    key = f"poster:record-cooldown:{loc['id']}:{period}:{scope}"
+    _redis().set(key, datetime.now().isoformat(), ex=60 * 60 * 24 * RECORD_REPOST_COOLDOWN_DAYS)
+
+
 # ---------------------------------------------------------------------------
 # Schedule helpers
 # ---------------------------------------------------------------------------
@@ -390,17 +419,26 @@ def is_posting_time(loc: dict, now_utc: datetime) -> bool:
     return diff <= POST_WINDOW_MINUTES
 
 
+def is_scheduled_period(loc: dict, period: str, now_utc: datetime) -> bool:
+    """Whether `period` falls on its regular TIER_SCHEDULE cadence today
+    (as opposed to being checked opportunistically, see OPPORTUNISTIC_PERIODS)."""
+    rule = TIER_SCHEDULE.get(loc["tier"], {}).get(period)
+    today = now_utc.date()
+    if rule is None:
+        return True
+    if rule == "first":
+        return today.day == 1
+    if isinstance(rule, list):
+        return today.weekday() in rule
+    return False
+
+
 def periods_due_today(loc: dict, now_utc: datetime) -> list:
     schedule = TIER_SCHEDULE.get(loc["tier"], {})
-    today = now_utc.date()
     due = []
 
-    for period, rule in schedule.items():
-        if (
-            rule is None
-            or (rule == "first" and today.day == 1)
-            or (isinstance(rule, list) and today.weekday() in rule)
-        ):
+    for period in schedule:
+        if period in OPPORTUNISTIC_PERIODS or is_scheduled_period(loc, period, now_utc):
             due.append(period)
 
     return due
@@ -546,6 +584,7 @@ def post_location_period(
     loc: dict,
     period: str,
     platforms: list,
+    now_utc: datetime,
     dry_run: bool = False,
 ) -> None:
     loc_id = loc["id"]
@@ -554,14 +593,20 @@ def post_location_period(
         print(f"  skip {loc_id}/{period} — already posted today")
         return
 
+    opportunistic = period in OPPORTUNISTIC_PERIODS and not is_scheduled_period(loc, period, now_utc)
+
+    if opportunistic and not dry_run and record_repost_on_cooldown(loc, period, now_utc):
+        print(f"  skip {loc_id}/{period} — opportunistic recheck still in cooldown")
+        return
+
     try:
-        data = fetch_temphist_data(period, loc)
+        data = fetch_temphist_data(period, loc, now_utc)
     except Exception as exc:
         log.error("fetch %s/%s failed: %s", loc_id, period, exc)
         print(f"  ✗ fetch {loc_id}/{period}: {exc}", file=sys.stderr)
         return
 
-    if loc["tier"] == TIER_2 and not is_remarkable(data):
+    if (loc["tier"] == TIER_2 or opportunistic) and not is_remarkable(data):
         if dry_run and data.ranking_warm is not None and data.ranking_cold is not None and data.gradient_factor is not None:
             score = remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor)
             log.info("[DRY RUN] skip %s/%s — not remarkable (score=%.1f, warm_rank=%s, cold_rank=%s, gf=%.2f)",
@@ -611,6 +656,8 @@ def post_location_period(
 
     if not dry_run:
         mark_posted(loc_id, period)
+        if opportunistic:
+            mark_record_reposted(loc, period, now_utc)
 
 
 
@@ -698,7 +745,7 @@ def main():
 
         log.info("posting %s: %s", loc["id"], periods)
         for period in periods:
-            post_location_period(loc, period, platforms, dry_run=args.dry_run)
+            post_location_period(loc, period, platforms, now_utc, dry_run=args.dry_run)
 
     log.info("poster done")
 
