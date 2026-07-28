@@ -143,8 +143,8 @@ class TestFormatLocationPost:
         text = format_location_post(make_post(), include_url=False)
         assert "https://temphist.com/s/abc123" not in text
 
-    def test_contains_temphist_hashtag(self):
-        assert "#TempHist" in format_location_post(make_post())
+    def test_contains_climate_hashtag(self):
+        assert "#climate" in format_location_post(make_post())
 
     def test_location_hashtag_no_spaces(self):
         text = format_location_post(make_post(location="New York", location_id="new_york"))
