@@ -328,7 +328,7 @@ def _build_post_body(post: TempHistPost, include_url: bool = True) -> str:
         f"{label} in {post.location}{' ' + icons if icons else ''}\n\n"
         f"{post.summary}\n\n"
         f"Average: {post.average:.1f}{sym} · Trend: {slope_str} {sym}/decade\n\n"
-        f"{tags} {loc_tag} #TempHist"
+        f"{tags} {loc_tag} #climate"
     )
     if include_url:
         body += f"\n\n{post.share_url}"
