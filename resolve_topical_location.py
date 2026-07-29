@@ -18,6 +18,7 @@ import sys
 from zoneinfo import available_timezones
 
 import httpx
+import pytz
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,8 +67,33 @@ def choose_result(results: list) -> dict:
     return results[idx]
 
 
-def prompt_timezone() -> str:
+def prompt_timezone(country_code: str) -> str:
+    """Prompt for an IANA timezone, pre-filling it from the country when that
+    narrows it to one option, or offering a pick-list when it doesn't — so the
+    admin isn't expected to already know the answer. Falls back to free-text
+    entry (validated against the full IANA database) for countries pytz has
+    no data for, or if none of the offered options fit."""
     zones = available_timezones()
+    candidates = sorted(pytz.country_timezones.get(country_code.upper(), []))
+
+    if len(candidates) == 1:
+        default = candidates[0]
+        tz = input(f"IANA timezone [{default}] (Enter to accept, or type another): ").strip()
+        return tz or default
+
+    if candidates:
+        print(f"{country_code} has {len(candidates)} timezones — pick one, or type your own:")
+        for i, zone in enumerate(candidates):
+            print(f"  [{i}] {zone}")
+        while True:
+            choice = input("Number or IANA timezone: ").strip()
+            if choice.isdigit() and int(choice) in range(len(candidates)):
+                return candidates[int(choice)]
+            if choice in zones:
+                return choice
+            print(f"  {choice!r} isn't one of the options above or a recognised IANA timezone — try again.")
+
+    print(f"No known timezones for country code {country_code!r} — enter one manually.")
     while True:
         tz = input("IANA timezone (e.g. Europe/Paris): ").strip()
         if tz in zones:
@@ -117,7 +143,7 @@ def main() -> None:
         return
 
     print(f"'{name}' isn't known to the API yet — need a full tuple.")
-    tz = prompt_timezone()
+    tz = prompt_timezone(country)
     entry = f"{loc_id}:{tz}:{country}:{name}"
     print(f"\nTOPICAL_LOCATIONS entry:\n\n  {entry}")
 
