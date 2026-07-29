@@ -82,18 +82,29 @@ def main() -> None:
     parser.add_argument("query", help="City name to search for, e.g. 'Biarritz'")
     args = parser.parse_args()
 
-    with _client() as client:
-        results = search(client, args.query)
-        if not results:
-            print(f"No matches for {args.query!r}.", file=sys.stderr)
-            sys.exit(1)
+    base_url = os.environ["TEMPHIST_API_URL"]
+    try:
+        with _client() as client:
+            results = search(client, args.query)
+            if not results:
+                print(f"No matches for {args.query!r}.", file=sys.stderr)
+                sys.exit(1)
 
-        result = choose_result(results)
-        name = result["name"]
-        country = result["country_code"]
-        loc_id = result.get("location_id") or slugify(name)
+            result = choose_result(results)
+            name = result["name"]
+            country = result["country_code"]
+            loc_id = result.get("location_id") or slugify(name)
 
-        tier = find_existing_tier(client, loc_id)
+            tier = find_existing_tier(client, loc_id)
+    except httpx.ConnectError as exc:
+        print(f"Could not connect to {base_url} — is the API server running there?", file=sys.stderr)
+        print(f"({exc})", file=sys.stderr)
+        sys.exit(1)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        hint = " — check TEMPHIST_API_KEY" if status in (401, 403) else ""
+        print(f"API error {status} for {exc.request.url}{hint}", file=sys.stderr)
+        sys.exit(1)
 
     if tier == "tier1":
         print(f"'{name}' is already tier1 (preapproved) — it posts unconditionally already.")
