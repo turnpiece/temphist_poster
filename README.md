@@ -38,6 +38,7 @@ Mount a persistent Railway volume and set `POST_LOG_PATH` to avoid duplicate pos
 | `MASTODON_ACCESS_TOKEN` | Yes (Mastodon) | Mastodon OAuth access token |
 | `MASTODON_API_BASE_URL` | Yes (Mastodon) | Mastodon instance URL, e.g. `https://mastodon.social` |
 | `POST_LOG_PATH` | No | Path to the deduplication log file (default: `/tmp/temphist_post_log.json`) |
+| `TOPICAL_LOCATIONS` | No | Comma-separated list of admin-selected locations to add to the posting pool. Each entry is either an `id` already present in that run's preapproved/popular results, or a self-contained `id:tz:country:label` tuple for a location not yet surfaced by those endpoints, e.g. `TOPICAL_LOCATIONS=bordeaux,biarritz:Europe/Paris:FR:Biarritz`. Still gated by the same remarkability check as Tier 2. |
 
 ## Installation
 
@@ -61,6 +62,10 @@ python poster.py --dry-run
 python poster.py --force today
 python poster.py --force week --location london
 
+# Force a specific location past the remarkability gate too (only when
+# --force is combined with --location — a plain --force still respects it)
+python poster.py --force today --location bordeaux
+
 # Post only to one platform
 python poster.py --platforms bluesky
 
@@ -75,6 +80,15 @@ python poster.py --force aggregate --dry-run
 | Tier 1 | London, New York, Los Angeles, Chicago, Sydney, Toronto, Dublin, Auckland | Daily · Weekly (Mon) · Monthly (1st) · Year-to-date (1st) |
 | Tier 2 | Singapore, Johannesburg, Nairobi, Mumbai | Daily only |
 | Tier 3 | Tokyo, Amsterdam, Dubai | Planned for v2 — remarkable days only |
+| Topical | Manually set via `TOPICAL_LOCATIONS` | Daily · Weekly (Mon) · Monthly (1st) · Year-to-date (1st) — same as Tier 1/2, gated by remarkability like Tier 2 |
+
+Topical locations let the operator manually add a location to the pool — e.g. reacting to a
+heatwave making a location's month or year record-setting — without waiting for it to
+accumulate enough organic app selections to surface via the popular-locations API. They get
+the same full posting schedule as Tier 1/2, but remain subject to the remarkability gate:
+topicality is how the location gets considered, not a way to bypass the check that its data is
+actually noteworthy. A location already in the preapproved (Tier 1) list is left unchanged if
+also listed in `TOPICAL_LOCATIONS`, since Tier 1 already posts unconditionally.
 
 ## Deduplication
 

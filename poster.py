@@ -52,6 +52,7 @@ log.info("poster starting up")
 
 TIER_1 = "tier1"
 TIER_2 = "tier2"
+TIER_TOPICAL = "topical"
 
 FAHRENHEIT_COUNTRIES = {"US"}
 
@@ -73,6 +74,9 @@ TIER_SCHEDULE = {
         "year": "first",  # 1st of month — only posted when remarkable
     },
 }
+# Topical locations (admin-selected via TOPICAL_LOCATIONS) share tier2's
+# schedule and remarkability gate — see load_locations()/_parse_topical_locations.
+TIER_SCHEDULE[TIER_TOPICAL] = TIER_SCHEDULE[TIER_2]
 
 # Local hour at which to post (24h)
 POST_HOUR_LOCAL = 16
@@ -133,9 +137,66 @@ def load_locations() -> list:
         if loc["id"] not in preapproved_ids and loc.get("timezone") and loc.get("country_code"):
             locations.append(_to_loc(loc, TIER_2))
 
+    _parse_topical_locations(os.environ.get("TOPICAL_LOCATIONS", ""), locations)
+
     tier1_count = sum(1 for loc in locations if loc["tier"] == TIER_1)
-    log.info("loaded %d locations (%d tier1, %d tier2)", len(locations), tier1_count, len(locations) - tier1_count)
+    tier2_count = sum(1 for loc in locations if loc["tier"] == TIER_2)
+    topical_count = sum(1 for loc in locations if loc["tier"] == TIER_TOPICAL)
+    log.info(
+        "loaded %d locations (%d tier1, %d tier2, %d topical)",
+        len(locations), tier1_count, tier2_count, topical_count,
+    )
     return locations
+
+
+def _parse_topical_locations(env_value: str, locations: list) -> list:
+    """Fold TOPICAL_LOCATIONS entries into `locations` in place, tagging
+    matched entries TIER_TOPICAL.
+
+    Each comma-separated entry is either a bare `id` (must already be
+    present in `locations`, i.e. known via preapproved/popular this run)
+    or a self-contained `id:tz:country:label` tuple, for a location not
+    yet surfaced by those endpoints. Returns the ids tagged topical.
+    """
+    by_id = {loc["id"]: loc for loc in locations}
+    topical_ids = []
+
+    for raw_entry in env_value.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+
+        parts = entry.split(":")
+        if len(parts) == 1:
+            existing = by_id.get(parts[0])
+            if existing is None:
+                log.error(
+                    "TOPICAL_LOCATIONS: %r not found in preapproved/popular "
+                    "results and no tz:country:label given — skipping", parts[0],
+                )
+                continue
+        elif len(parts) == 4:
+            loc_id, tz, country, label = parts
+            existing = by_id.get(loc_id)
+            if existing is None:
+                existing = {"id": loc_id, "label": label, "tz": tz, "country": country, "tier": TIER_2}
+                locations.append(existing)
+                by_id[loc_id] = existing
+        else:
+            log.error(
+                "TOPICAL_LOCATIONS: malformed entry %r — expected "
+                "id or id:tz:country:label — skipping", entry,
+            )
+            continue
+
+        if existing["tier"] == TIER_1:
+            log.info("TOPICAL_LOCATIONS: %r already tier1 — leaving as-is", existing["id"])
+            continue
+
+        existing["tier"] = TIER_TOPICAL
+        topical_ids.append(existing["id"])
+
+    return topical_ids
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +647,7 @@ def post_location_period(
     platforms: list,
     now_utc: datetime,
     dry_run: bool = False,
+    skip_remarkability_gate: bool = False,
 ) -> None:
     loc_id = loc["id"]
 
@@ -606,14 +668,21 @@ def post_location_period(
         print(f"  ✗ fetch {loc_id}/{period}: {exc}", file=sys.stderr)
         return
 
-    if (loc["tier"] == TIER_2 or opportunistic) and not is_remarkable(data):
-        if dry_run and data.ranking_warm is not None and data.ranking_cold is not None and data.gradient_factor is not None:
+    gate_applies = loc["tier"] in (TIER_2, TIER_TOPICAL) or opportunistic
+    if gate_applies and not is_remarkable(data):
+        if skip_remarkability_gate:
+            log.info(
+                "%s/%s not remarkable but posting anyway (--force --location override)",
+                loc_id, period,
+            )
+        elif dry_run and data.ranking_warm is not None and data.ranking_cold is not None and data.gradient_factor is not None:
             score = remarkability_score(data.ranking_warm, data.ranking_cold, data.gradient_factor)
             log.info("[DRY RUN] skip %s/%s — not remarkable (score=%.1f, warm_rank=%s, cold_rank=%s, gf=%.2f)",
                      loc_id, period, score, data.ranking_warm, data.ranking_cold, data.gradient_factor)
+            return
         else:
             log.info("skip %s/%s — not remarkable", loc_id, period)
-        return
+            return
 
     sym = unit_symbol(data.units)
     alt_text = (
@@ -734,6 +803,10 @@ def main():
     platforms = make_platforms(args.platforms, args.dry_run)
     locations = _resolve_locations(args.location, all_locations)
 
+    skip_remarkability_gate = bool(args.force and args.location)
+    if skip_remarkability_gate:
+        log.info("--force + --location given for %s: bypassing remarkability gate", args.location)
+
     # Per-location posts
     for loc in locations:
         periods = _periods_for_location(
@@ -745,7 +818,11 @@ def main():
 
         log.info("posting %s: %s", loc["id"], periods)
         for period in periods:
-            post_location_period(loc, period, platforms, now_utc, dry_run=args.dry_run)
+            post_location_period(
+                loc, period, platforms, now_utc,
+                dry_run=args.dry_run,
+                skip_remarkability_gate=skip_remarkability_gate,
+            )
 
     log.info("poster done")
 

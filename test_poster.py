@@ -30,7 +30,9 @@ import poster  # noqa: E402  (must come after stubs)
 from poster import (  # noqa: E402
     TIER_1,
     TIER_2,
+    TIER_TOPICAL,
     TempHistPost,
+    _parse_topical_locations,
     _ranking_points,
     already_posted,
     format_location_post,
@@ -40,6 +42,7 @@ from poster import (  # noqa: E402
     mark_posted,
     mark_record_reposted,
     periods_due_today,
+    post_location_period,
     preferred_units,
     record_repost_on_cooldown,
     remarkability_score,
@@ -290,6 +293,62 @@ class TestIsScheduledPeriod:
         assert is_scheduled_period(loc, "year", utc(2026, 6, 16, 16)) is False
 
 
+# ---------------------------------------------------------------------------
+# Location loading: topical locations
+# ---------------------------------------------------------------------------
+
+
+class TestParseTopicalLocations:
+    def test_empty_env_is_noop(self):
+        locations = [make_loc(id="london", tier=TIER_1)]
+        result = _parse_topical_locations("", locations)
+        assert result == []
+        assert locations[0]["tier"] == TIER_1
+
+    def test_bare_id_retags_existing_tier2(self):
+        loc = make_loc(id="singapore", tier=TIER_2)
+        result = _parse_topical_locations("singapore", [loc])
+        assert loc["tier"] == TIER_TOPICAL
+        assert result == ["singapore"]
+
+    def test_bare_id_leaves_tier1_untouched(self):
+        loc = make_loc(id="london", tier=TIER_1)
+        result = _parse_topical_locations("london", [loc])
+        assert loc["tier"] == TIER_1
+        assert result == []
+
+    def test_bare_id_not_found_is_skipped_not_crashed(self):
+        result = _parse_topical_locations("nowhere", [make_loc(id="london")])
+        assert result == []
+
+    def test_full_tuple_appends_new_location(self):
+        locations = [make_loc(id="london", tier=TIER_1)]
+        result = _parse_topical_locations(
+            "biarritz:Europe/Paris:FR:Biarritz", locations,
+        )
+        assert result == ["biarritz"]
+        added = next(l for l in locations if l["id"] == "biarritz")
+        assert added == {
+            "id": "biarritz", "label": "Biarritz",
+            "tz": "Europe/Paris", "country": "FR", "tier": TIER_TOPICAL,
+        }
+
+    def test_full_tuple_for_existing_tier2_id_retags_in_place(self):
+        loc = make_loc(id="singapore", tier=TIER_2, tz="Asia/Singapore", country="SG")
+        _parse_topical_locations("singapore:Asia/Singapore:SG:Singapore", [loc])
+        assert loc["tier"] == TIER_TOPICAL
+
+    def test_malformed_entry_skipped_others_still_processed(self):
+        locations = [make_loc(id="singapore", tier=TIER_2)]
+        result = _parse_topical_locations("a:b:c,singapore", locations)
+        assert result == ["singapore"]
+
+    def test_multiple_comma_separated_entries_with_whitespace(self):
+        locations = [make_loc(id="singapore", tier=TIER_2)]
+        result = _parse_topical_locations(
+            " singapore , biarritz:Europe/Paris:FR:Biarritz ", locations,
+        )
+        assert set(result) == {"singapore", "biarritz"}
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +425,71 @@ class TestRecordRepostCooldown:
         now = utc(2026, 6, 16, 16)
         mark_record_reposted(make_loc(id="london"), "month", now)
         assert record_repost_on_cooldown(make_loc(id="paris"), "month", now) is False
+
+
+# ---------------------------------------------------------------------------
+# Remarkability gate by tier, and the --force --location bypass
+# ---------------------------------------------------------------------------
+
+
+class FakePlatform:
+    name = "fake"
+    MAX_CHARS = 300
+    LINK_IN_TEXT = True
+    ATTACH_MEDIA = False
+
+    def __init__(self):
+        self.posted = []
+
+    def post_with_image(self, *args, **kwargs):
+        self.posted.append(("image", args, kwargs))
+        return "https://example.com/1"
+
+    def post_text(self, text):
+        self.posted.append(("text", text))
+        return "https://example.com/1"
+
+
+class TestRemarkabilityGateByTier:
+    @pytest.fixture(autouse=True)
+    def fake_redis(self):
+        fr = FakeRedis()
+        with patch.object(poster, "_redis", return_value=fr):
+            yield fr
+
+    def _run(self, tier, remarkable, skip_gate=False):
+        loc = make_loc(id="test_loc", tier=tier)
+        platform = FakePlatform()
+        post = make_post(
+            ranking_warm=1 if remarkable else 7,
+            ranking_cold=51,
+            gradient_factor=0.0,
+        )
+        with patch.object(poster, "fetch_temphist_data", return_value=post):
+            post_location_period(
+                loc, "today", [platform], utc(2026, 6, 16, 16),
+                skip_remarkability_gate=skip_gate,
+            )
+        return platform
+
+    def test_tier1_posts_even_when_not_remarkable(self):
+        assert self._run(TIER_1, remarkable=False).posted
+
+    def test_tier2_skips_when_not_remarkable(self):
+        assert self._run(TIER_2, remarkable=False).posted == []
+
+    def test_topical_skips_when_not_remarkable(self):
+        assert self._run(TIER_TOPICAL, remarkable=False).posted == []
+
+    def test_topical_posts_when_remarkable(self):
+        assert self._run(TIER_TOPICAL, remarkable=True).posted
+
+    def test_skip_gate_forces_post_for_non_remarkable_topical(self):
+        assert self._run(TIER_TOPICAL, remarkable=False, skip_gate=True).posted
+
+    def test_skip_gate_does_not_affect_dedup_check(self):
+        mark_posted("test_loc", "today")
+        assert self._run(TIER_TOPICAL, remarkable=False, skip_gate=True).posted == []
 
 
 # ---------------------------------------------------------------------------
