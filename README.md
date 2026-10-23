@@ -35,7 +35,7 @@ Deduplication and the opportunistic-record cooldown are stored in Redis (`REDIS_
 | `BLUESKY_APP_PASSWORD` | Yes (Bluesky) | Bluesky app password |
 | `MASTODON_ACCESS_TOKEN` | Yes (Mastodon) | Mastodon OAuth access token |
 | `MASTODON_API_BASE_URL` | Yes (Mastodon) | Mastodon instance URL, e.g. `https://mastodon.social` |
-| `TOPICAL_LOCATIONS` | No | Comma-separated list of admin-selected locations to add to the posting pool. Each entry is either an `id` already present in that run's preapproved/popular results, or a self-contained `id:tz:country:label` tuple for a location not yet surfaced by those endpoints, e.g. `TOPICAL_LOCATIONS=bordeaux,biarritz:Europe/Paris:FR:Biarritz`. Still gated by the same remarkability check as Tier 2. Run `python resolve_topical_location.py "<city name>"` to look up the right entry instead of assembling it by hand. |
+| `TOPICAL_LOCATIONS` | No | Comma-separated list of admin-selected locations to add to the posting pool. Each entry is either an `id` already present in that run's preapproved/popular results, or a self-contained `id:tz:country:label` tuple for a location not yet surfaced by those endpoints, e.g. `TOPICAL_LOCATIONS=bordeaux,biarritz:Europe/Paris:FR:Biarritz`. Still gated by the same remarkability check as Tier 2. `country` must be a two-letter ISO 3166-1 code; it is sent to the share API as `country_code`, and anything else is logged and omitted. Run `python resolve_topical_location.py "<city name>"` to look up the right entry instead of assembling it by hand. |
 
 ## Installation
 
