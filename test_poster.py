@@ -1,5 +1,6 @@
 """Unit tests for poster.py."""
 
+import json
 import os
 import sys
 import types
@@ -7,6 +8,7 @@ from datetime import date, datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -592,3 +594,79 @@ class TestIsRemarkable:
     def test_custom_threshold(self):
         post = _make_post(ranking_warm=7, ranking_cold=51, gradient_factor=0.3)
         assert is_remarkable(post, threshold=3.0) is True
+
+
+# ---------------------------------------------------------------------------
+# Share request body
+# ---------------------------------------------------------------------------
+
+class TestShareRequestBody:
+    """fetch_temphist_data's POST /v1/shares body, driven over a mock transport."""
+
+    @pytest.fixture
+    def share_bodies(self, monkeypatch):
+        monkeypatch.setenv("TEMPHIST_API_URL", "https://api.test")
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path == "/v1/shares":
+                bodies.append(json.loads(request.content))
+                return httpx.Response(200, json={"id": "abc", "url": "/s/abc"})
+            if request.url.path.endswith("/meta"):
+                return httpx.Response(200, json={"data": {
+                    "summary": "Mild.",
+                    "average": {"mean": 14.5},
+                    "trend": {"slope": 0.1},
+                }})
+            if request.url.path == "/v1/og/abc.png":
+                return httpx.Response(200, content=b"\x89PNG")
+            return httpx.Response(404)
+
+        real_client = httpx.Client
+
+        def client_factory(*args, **kwargs):
+            return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+        with patch.object(poster.httpx, "Client", client_factory):
+            yield bodies
+
+    def _share_body(self, bodies, **loc_overrides):
+        loc = {**make_loc(), **loc_overrides}
+        poster.fetch_temphist_data("today", loc, utc(2026, 6, 16, 16))
+        assert len(bodies) == 1
+        return bodies[0]
+
+    def test_includes_country_code(self, share_bodies):
+        assert self._share_body(share_bodies)["country_code"] == "GB"
+
+    def test_keeps_existing_fields(self, share_bodies):
+        body = self._share_body(share_bodies)
+        assert body["location"] == "London"
+        assert body["period"] == "daily"
+        assert body["unit"] == "celsius"
+
+    def test_includes_coordinates_when_present(self, share_bodies):
+        body = self._share_body(share_bodies, latitude=51.5, longitude=-0.12)
+        assert (body["latitude"], body["longitude"]) == (51.5, -0.12)
+
+    def test_omits_coordinates_when_absent(self, share_bodies):
+        body = self._share_body(share_bodies)
+        assert "latitude" not in body and "longitude" not in body
+
+    @pytest.mark.parametrize("lat, lon", [(51.5, None), (None, -0.12), (None, None)])
+    def test_omits_coordinates_unless_both_present(self, share_bodies, lat, lon):
+        body = self._share_body(share_bodies, latitude=lat, longitude=lon)
+        assert "latitude" not in body and "longitude" not in body
+
+    def test_zero_coordinates_are_sent(self, share_bodies):
+        body = self._share_body(share_bodies, latitude=0.0, longitude=0.0)
+        assert (body["latitude"], body["longitude"]) == (0.0, 0.0)
+
+    @pytest.mark.parametrize("country", ["GBR", "", "G1"])
+    def test_invalid_country_omitted_and_post_still_succeeds(self, share_bodies, country):
+        body = self._share_body(share_bodies, country=country)
+        assert "country_code" not in body
+
+    @pytest.mark.parametrize("country", ["UK", "uk"])
+    def test_uk_passed_through_for_api_to_map(self, share_bodies, country):
+        assert self._share_body(share_bodies, country=country)["country_code"] == country
