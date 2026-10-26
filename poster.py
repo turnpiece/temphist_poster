@@ -18,6 +18,7 @@ Dependencies:
 import argparse
 import logging
 import os
+import re
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -125,6 +126,8 @@ def load_locations() -> list:
             "label": raw["name"],
             "tz": raw["timezone"],
             "country": raw["country_code"],
+            "latitude": raw.get("latitude"),
+            "longitude": raw.get("longitude"),
             "tier": tier,
         }
 
@@ -266,6 +269,33 @@ def site_url() -> str:
     return os.environ.get("TEMPHIST_URL", "https://temphist.com").rstrip("/")
 
 
+def _share_location_fields(loc: dict) -> dict:
+    """Optional location fields for the POST /v1/shares body.
+
+    The API answers 422 for an invalid country_code, which would fail the
+    whole post, so a hand-typed TOPICAL_LOCATIONS country that isn't two
+    letters is left out (the API then falls back to guessing from the name).
+    Coordinates are only sent as a pair, and are nullable for popular locations.
+    """
+    fields = {}
+
+    country = (loc.get("country") or "").strip()
+    if re.fullmatch(r"[A-Za-z]{2}", country):
+        fields["country_code"] = country
+    else:
+        log.warning(
+            "%s: country %r is not a two-letter code — not sending country_code",
+            loc["id"], loc.get("country"),
+        )
+
+    lat, lon = loc.get("latitude"), loc.get("longitude")
+    if lat is not None and lon is not None:
+        fields["latitude"] = lat
+        fields["longitude"] = lon
+
+    return fields
+
+
 def fetch_temphist_data(
     period: str, loc: dict, now_utc: datetime | None = None
 ) -> TempHistPost:
@@ -312,6 +342,7 @@ def fetch_temphist_data(
                 "identifier": identifier,
                 "ref_year": ref_year,
                 "unit": units,
+                **_share_location_fields(loc),
             },
         )
         share_resp.raise_for_status()
